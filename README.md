@@ -1,3 +1,3 @@
-Tests js / node / sqlite
+Divers tests pour asocial
 
-c:\\tmp\sqlite3 test.db .schema > schema.sql
+Les fichiers de configuration sont à recopier dans ./config (qui est en .gitignore).
