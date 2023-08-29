@@ -1,0 +1,19 @@
+{
+  "name": "git",
+  "version": "1.0.0",
+  "main": "index.js",
+  "license": "MIT",
+  "dependencies": {
+    "@google-cloud/firestore": "^6.7.0",
+    "@google-cloud/logging-winston": "^6.0.0",
+    "@google-cloud/storage": "^7.0.1",
+    "@msgpack/msgpack": "^2.8.0",
+    "axios": "^1.4.0",
+    "base64url": "^3.0.1",
+    "better-sqlite3": "^8.0.1",
+    "js-sha256": "^0.9.0",
+    "showdown": "^1.9.1",
+    "websocket": "^1.0.34",
+    "winston": "^3.10.0"
+  }
+}

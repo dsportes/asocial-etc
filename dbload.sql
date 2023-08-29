@@ -1,0 +1,10 @@
+insert into gcvols (id, _data_) values (32, x'81a474726370a461626364');
+insert into tribus (id, v, iv, dh, _data_) values (109, 1, 109000001, 17891515, x'84a269646da17601a26468ce011100bba4626c6f6300');
+insert into comptas (id, v, iv, idt, hps1, _data_) values (100, 1, 100000001, 109, 1515, x'85a2696464a17601a36964746da468707331cd05eba4626c6f6300');
+insert into avatars (id, v, iv, dds, _data_) values (100, 1, 100000001, 0, x'83a2696464a17601a364647300');
+insert into chats (id, ids, v, iv, _data_) values (100, 12, 1, 100000001, x'83a2696464a36964730ca17601');
+insert into secrets (id, ids, v, iv, _data_) values (100, 25, 1, 100000001, x'83a2696464a369647319a17601');
+insert into transferts (id, ids, dlv) values (100, 35, 0);
+insert into rdvs (ids, id, v, ttl, iv, _data_) values (1789, 100, 1, 0, 100000001, x'83a3696473cd06fda2696464a374746c00');
+insert into groupes (id, v, dds, iv, _data_) values (108, 1, 0, 108000001, x'83a269646ca17601a364647300');
+insert into membres (id, ids, v, iv, _data_) values (108, 1, 1, 108000001, x'84a269646ca369647301a17601a364647300');
