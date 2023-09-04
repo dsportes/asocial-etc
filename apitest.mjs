@@ -1,11 +1,11 @@
-import { AMJ } from './api.mjs'
+// import { AMJ } from './api.mjs'
 
 async function test () {
- try {
-
- } catch (e) {
-  console.log(e)
- }
+  try {
+    // TODO
+  } catch (e) {
+    console.log(e)
+  }
 }
 
 test()

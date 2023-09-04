@@ -15,5 +15,8 @@
     "showdown": "^1.9.1",
     "websocket": "^1.0.34",
     "winston": "^3.10.0"
+  },
+  "devDependencies": {
+    "eslint": "^8.48.0"
   }
 }
