@@ -313,7 +313,7 @@ Unités:
 - E : écriture d'un document.
 - € : unité monétaire.
 
-quotas et volumes `qv` : `[ qc, q1, q2, nn, nc, ng, v2 ]`
+quotas et volumes `qv` : `{ qc, q1, q2, nn, nc, ng, v2 }`
 consommations `conso` : `{ nl, ne, vm, vd }`
 - `qc`: quota de consommation
 - `q1`: quota du nombre total de notes / chats / groupes.
@@ -327,9 +327,9 @@ consommations `conso` : `{ nl, ne, vm, vd }`
 - `vm`: volume _montant_ vers le Storage (upload).
 - `vd`: volume _descendant_ du Storage (download).
 */
-export class Fact {
+export class Compteurs {
   static VALIDMOYC = 86400 * 1000 * 7
-  
+
   static NHD = 4 // nombre de mois d'historique détaillé (dont le mois en cours)
   static NHM = 18 // nombre de mois d'historique des montants des coûts (dont le mois en cours)
 
@@ -349,18 +349,21 @@ export class Fact {
   static NE = 1 // nombre d'écritures.
   static VM = 2 // volume _montant_ vers le Storage (upload).
   static VD = 3 // volume _descendant_ du Storage (download).
-  static MS = Fact.X1 + Fact.X2 // nombre de ms dans le mois - si 0, le compte n'était pas créé
-  static CA = Fact.X1 + Fact.X2 + 1 // coût de l'abonnment pour le mois
-  static CC = Fact.X1 + Fact.X2 + 2 // coût de la consommation pour le mois
+  static MS = Compteurs.X1 + Compteurs.X2 // nombre de ms dans le mois - si 0, le compte n'était pas créé
+  static CA = Compteurs.X1 + Compteurs.X2 + 1 // coût de l'abonnment pour le mois
+  static CC = Compteurs.X1 + Compteurs.X2 + 2 // coût de la consommation pour le mois
 
-  static NBCD = Fact.X1 + (2 * Fact.X2) + Fact.X3
+  static NBCD = Compteurs.X1 + (2 * Compteurs.X2) + Compteurs.X3
 
   static lp = ['dh0', 'dh', 'qv', 'vd', 'mm', 'aboma', 'consoma']
+  static lqv = ['qc', 'q1', 'q2', 'nn', 'nc', 'ng', 'v2']
 
   /*
   dh0 : date-heure de création du compte
   dh : date-heure courante
-  qv : quotas et volumes courants `{ qc, q1, q2, nn, nc, ng, v2 }`
+  qv : quotas et volumes du dernier calcul `{ qc, q1, q2, nn, nc, ng, v2 }`.
+    Quand on _prolonge_ l'état actuel pendant un certain temps AVANT d'appliquer de nouvelles valeurs,
+    il faut pouvoir disposer de celles-ci.
   vd : [0..3] - vecteurs détaillés pour M M-1 M-2 M-3.
   mm : [0..18] - coût abo + conso pour le mois M et les 17 mois antérieurs (si 0 pour un mois, le compte n'était pas créé)
   aboma : somme des coûts d'abonnement des mois antérieurs depuis la création du compte
@@ -386,52 +389,92 @@ export class Fact {
     - CC : coût de la consommation pour le mois
   */
 
-  constructor (serial, qv, dh) {
+  /*
+  - serial : sérialisation de l'état antérieur, null pour une création (qv est alors requis)
+  - qv: facultatif. compteurs de quotas et des nombres de notes, chats, groupes et V2. 
+    En cas de présence, mise à jour APRES recalcul à l'instant actuel.
+  - conso: facultatif. compteurs de consommation à ajouter au mois courant.
+    En cas de présence, ajouts APRES recalcul à l'instant actuel.
+  - dh: normalement absent. Utilisé pour faire des tests indépendants de la date-heure courante.
+  */
+  constructor (serial, qv, conso, dh) {
     const t = dh || new Date().getTime()
     if (serial) {
       const x = decode(serial)
-      Fact.lp.forEach(p => { this[p] = x[p]})
+      Compteurs.lp.forEach(p => { this[p] = x[p]})
       this.shift(t)
       if (qv) this.qv = qv // valeurs de quotas / volumes à partir de maintenant
+      if (conso) this.majConso(conso)
     } else { // création - Les quotas sont initialisés, les consommations et montants monétaires nuls
       this.dh0 = t
       this.dh = t
       this.qv = qv
-      this.vd = new Array(Fact.NHD)
-      for(let i = 0; i < Fact.NHD; i++) this.vd[i] = new Array(Fact.NBCD).fill(0)
-      this.mm = new Array[Fact.NHM].fill(0)
+      this.vd = new Array(Compteurs.NHD)
+      for(let i = 0; i < Compteurs.NHD; i++) this.vd[i] = new Array(Compteurs.NBCD).fill(0)
+      this.mm = new Array[Compteurs.NHM].fill(0)
       this.aboma = 0
       this.consoma = 0
     }
   }
 
   get serial() {
-    const x = {}; Fact.lp.forEach(p => { x[p] = this[p]})
+    const x = {}; Compteurs.lp.forEach(p => { x[p] = this[p]})
     return new Uint8Array(encode(x))
   }
 
-  get totalAbo () { return this.vd[0][Fact.CA] + this.vd[1][Fact.CA] }
+  get totalAbo () { return this.vd[0][Compteurs.CA] + this.vd[1][Compteurs.CA] }
 
-  get totalConso () { return this.vd[0][Fact.CC] + this.vd[1][Fact.CC] }
+  get totalConso () { return this.vd[0][Compteurs.CC] + this.vd[1][Compteurs.CC] }
 
   get totalAboConso () { return this.totalAbo + this.totalConso }
 
   // Moyenne _journalière_ de la consommation sur le mois en cours et les 3 précédents
   get moyconso4 () {
     let c = 0, ms = 0
-    for(let i = 0; i < Fact.NHD; i++) { c += this.vd[i][Fact.CC]; ms += this.vd[i][Fact.MS]; }
-    return ms < Fact.VALIDMOYC ? -1 : (c / (86400 * 100 * ms))
+    for(let i = 0; i < Compteurs.NHD; i++) { c += this.vd[i][Compteurs.CC]; ms += this.vd[i][Compteurs.MS]; }
+    return ms < Compteurs.VALIDMOYC ? -1 : (c / (86400 * 100 * ms))
   }
 
   /* Cadeau de dépannage de Comptable / sponsor pour surmonter un excès
   transitoire de consommation.
   */
   cadeau (c) {
-    this.consoma -= c
+    if (c <= this.consoma) this.consoma -= c; else this.consoma = 0
+    return this
+  }
+
+  /* Lors de la transition O <-> A : raz abonnement / consommation des mois antérieurs */
+  razma () {
+    this.aboma = 0
+    this.consoma = 0
     return this
   }
 
   // Méthodes privées
+  majConso (conso) { // { nl, ne, vm, vd }
+    const [ac, mc] = AMJ.am(this.dh)
+    const cu = Tarif.cu(ac, mc)
+    const v = this.vd[0]
+    let m = 0
+    if (conso.nl) {
+      v[Compteurs.X1 + Compteurs.NL] += conso.nl
+      m += cu[Compteurs.X1 + Compteurs.NL] * conso.nl
+    }
+    if (conso.ne) {
+      v[Compteurs.X1 + Compteurs.NE] += conso.ne
+      m += cu[Compteurs.X1 + Compteurs.NE] * conso.ne
+    }
+    if (conso.vd) {
+      v[Compteurs.X1 + Compteurs.VD] += conso.vd
+      m += cu[Compteurs.X1 + Compteurs.VD] * conso.vd
+    }
+    if (conso.vm) {
+      v[Compteurs.X1 + Compteurs.VM] += conso.vm
+      m += cu[Compteurs.X1 + Compteurs.VM] * conso.vm
+    }
+    v[Compteurs.CC] += m
+  }
+
   deltam (ac, mc, a, m) { // nombre de mois entiers entre l'ancien mois courant [ac, mc] et le futur [a, m]
     let n = 0, ax = ac, mx = mc
     while(m !== mx && a !== ax) { n++; mx++; if (mx === 13) { mx = 1; ax++ } }
@@ -446,7 +489,7 @@ export class Fact {
       // Si l'instant t est dans le mois de création, le nombre de ms AVANT dans le mois est moindre qua avx
       const av = this.dh0 > t0 ? (this.dh - this.dh0) : avx 
       const v = this.calculMC(av, ap, this.vd[0], Tarif.cu(ac, mc))  
-      this.mm[0] = v[Fact.CA] + v[Fact.CC] // le cout total du mois courant a changé
+      this.mm[0] = v[Compteurs.CA] + v[Compteurs.CC] // le cout total du mois courant a changé
       this.vd[0] = v // le détail du mois courant a changé
       this.dh = t // la date-heure du dernier calcul a changé
       return
@@ -457,16 +500,16 @@ export class Fact {
     const [ac, mc] = AMJ.am(this.dh)
     const n = this.deltam(ac, mc, a, m) // nombre de mois à créer et calculer (au moins 1, le futur courant)
     // init de la structure temporaire vd / mm
-    const _vd = new Array(Fact.NHD)
-    for(let i = 0; i < Fact.NHD; i++) _vd[i] = new Array(Fact.NBCD).fill(0)
-    const _mm = new Array[Fact.NHM].fill(0)
+    const _vd = new Array(Compteurs.NHD)
+    for(let i = 0; i < Compteurs.NHD; i++) _vd[i] = new Array(Compteurs.NBCD).fill(0)
+    const _mm = new Array[Compteurs.NHM].fill(0)
 
     { 
       // Mois courant "nouveau"
       const [, msmois, ] = AMJ.t0avap(t) // nb de ms AVANT t
       const v = this.calculNM (a, m, Tarif.cu(a, m), msmois)
       this.crmc = v[2] // le crédit du mois courant a été recalculé
-      _mm[0] = v[Fact.CA] + v[Fact.CC] // le cout total du mois courant a changé
+      _mm[0] = v[Compteurs.CA] + v[Compteurs.CC] // le cout total du mois courant a changé
       _vd[0] = v // le détail du mois courant a changé
     }
 
@@ -477,10 +520,10 @@ export class Fact {
       if (mx === 11) { ax++; mx = 1} else mx++
       const msmois = AMJ.djm(ax, mx) * 86400 *100 // nombre de millisecondes du mois
       const v = this.calculNM (Tarif.cu(ax, mx), msmois)
-      this.aboma += v[Fact.CA]
-      this.consoma += v[Fact.CC]
-      if (i < Fact.NHD) _vd[i] = v
-      if (i < Fact.NHM) _mm[i] = v[Fact.CA] + v[Fact.CC] // le cout total du nouveau mois a été calculé
+      this.aboma += v[Compteurs.CA]
+      this.consoma += v[Compteurs.CC]
+      if (i < Compteurs.NHD) _vd[i] = v
+      if (i < Compteurs.NHM) _mm[i] = v[Compteurs.CA] + v[Compteurs.CC] // le cout total du nouveau mois a été calculé
     }
 
     {
@@ -489,21 +532,21 @@ export class Fact {
       const av = this.dh0 > t0 ? (this.dh - this.dh0) : avx
       const v = this.calculMC(av, apx, this.vd[0], Tarif.cu(ac, mc))
       // le mois "ex" courant est dvenu antérieur
-      this.aboma += v[Fact.CA] 
-      this.consoma += v[Fact.CC]
-      if (n < Fact.NHD) _vd[n] = v
-      if (n < Fact.NHM) _mm[n] = v[Fact.CA] + v[Fact.CC] // le cout total de l'ex mois courant a été calculé
+      this.aboma += v[Compteurs.CA] 
+      this.consoma += v[Compteurs.CC]
+      if (n < Compteurs.NHD) _vd[n] = v
+      if (n < Compteurs.NHM) _mm[n] = v[Compteurs.CA] + v[Compteurs.CC] // le cout total de l'ex mois courant a été calculé
     }
 
     /* completer _vd si nécessaire. On a créé n mois. 
     - ajouter dans _vd les mois antérieurs dans la limite de NHD
     - ajouter dans _mm les mois antérieurs dans la limite de NHM
     */
-    let mq = Fact.NHD - n
+    let mq = Compteurs.NHD - n
     if (mq > 0) {
       for(let i = 0; i < mq; i++) _vd[n + i] = this.vd[i]
     }
-    mq = Fact.NHM - n
+    mq = Compteurs.NHM - n
     if (mq > 0) {
       for(let i = 0; i < mq; i++) _mm[n + i] = this.mm[i]
     }
@@ -516,43 +559,43 @@ export class Fact {
   }
 
   calculMC (av, ap, vmc, cu) { // calcul du mois courant par extension
-    const v = new Array(Fact.NBCD).fill(0)
-    v[Fact.MS] = av + ap // nombre de millisecondes du mois
+    const v = new Array(Compteurs.NBCD).fill(0)
+    v[Compteurs.MS] = av + ap // nombre de millisecondes du mois
     // Les X1 premiers compteurs sont des moyennes de quotas
-    for(let i = 0; i <= Fact.X1; i++)
-      v[i] = this.moy(av, ap, vmc[i], this.qv[i])
+    for(let i = 0; i <= Compteurs.X1; i++)
+      v[i] = this.moy(av, ap, vmc[i], this.qv[Compteurs.lqv[i]])
     // Les X2 suivants sont des cumuls de consommation
-    for(let i = 0; i <= Fact.X2; i++)
-      v[i + Fact.X1] = vmc[i + Fact.X1]
+    for(let i = 0; i <= Compteurs.X2; i++)
+      v[i + Compteurs.X1] = vmc[i + Compteurs.X1]
     // Les X2 suivants sont des moyennes de consommations
-    for(let i = 0; i <= Fact.X2; i++) 
-      v[i + Fact.X1 + Fact.X2] = this.moy(av, ap, vmc[i + Fact.X1 + Fact.X2], this.qv[Fact.X1 + i])
+    for(let i = 0; i <= Compteurs.X2; i++) 
+      v[i + Compteurs.X1 + Compteurs.X2] = this.moy(av, ap, vmc[i + Compteurs.X1 + Compteurs.X2], this.qv[Compteurs.lqv[Compteurs.X1 + i]])
     /* calcul du montant par multiplication par leur cout unitaire.
     - pour les X1 premiers "abonnement" le cu est annuel: on le calcule au prorata des ms du mois / ms d'un an
     */
-    for(let i = 0; i <= Fact.X1 + Fact.X2; i++) {
-      const x = v[i] * cu[i] * (i < Fact.X1 ? (v[Fact.MS] / MSPARAN) : 1)
-      v[i < Fact.X1 ? Fact.CA : Fact.CC] += x
+    for(let i = 0; i <= Compteurs.X1 + Compteurs.X2; i++) {
+      const x = v[i] * cu[i] * (i < Compteurs.X1 ? (v[Compteurs.MS] / MSPARAN) : 1)
+      v[i < Compteurs.X1 ? Compteurs.CA : Compteurs.CC] += x
     }
     return v
   }
 
   calculNM (cu, msmois) { // calcul d'un nouveau mois ENTIER
-    const v = new Array(Fact.NBCD).fill(0)
-    v[Fact.MS] = msmois// nombre de millisecondes du mois
+    const v = new Array(Compteurs.NBCD).fill(0)
+    v[Compteurs.MS] = msmois// nombre de millisecondes du mois
     // Les X1 premiers compteurs sont des moyennes de quotas à initialiser
-    for(let i = 0; i <= Fact.X1; i++)
-      v[i] = this.qv[i]
+    for(let i = 0; i <= Compteurs.X1; i++)
+      v[i] = this.qv[Compteurs.lqv[i]]
     // Les X2 suivants sont des cumuls de consommation à mettre à 0
-    for(let i = 0; i <= Fact.X2; i++)
-      v[i + Fact.X1] = 0
+    for(let i = 0; i <= Compteurs.X2; i++)
+      v[i + Compteurs.X1] = 0
     // Les X2 suivants sont des moyennes de consommations à initialiser
-    for(let i = 0; i <= Fact.X2; i++) 
-      v[i + Fact.X1 + Fact.X2] = this.qv[Fact.X1 + i]
+    for(let i = 0; i <= Compteurs.X2; i++) 
+      v[i + Compteurs.X1 + Compteurs.X2] = this.qv[Compteurs.lqv[Compteurs.X1 + i]]
 
     // Seuls les quotas accroissent l'abonnement. Il n'y a pas de consommation
-    for(let i = 0; i <= Fact.X1; i++) {
-      v[Fact.CA] += v[i] * cu[i] * (msmois / MSPARAN)
+    for(let i = 0; i <= Compteurs.X1; i++) {
+      v[Compteurs.CA] += v[i] * cu[i] * (msmois / MSPARAN)
     }
     return v
   }
