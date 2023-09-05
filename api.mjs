@@ -286,12 +286,14 @@ export function edvol (vol, u) {
   - `um`: 1 GB de transfert montant.
   - `ud`: 1 GB de transfert descendant.
 */
-class Tarif {
+export class Tarif {
   static tarifs = [
     { am: 202201, cu: [1.5, 0.45, 0.10, 80, 200, 15, 15] },
     { am: 202305, cu: [1.7, 0.45, 0.10, 80, 200, 15, 15] },
     { am: 202309, cu: [1.8, 0.45, 0.10, 80, 200, 15, 15] }
   ]
+
+  static init(t) { Tarif.tarifs = t}
 
   static cu (a, m) {
     const am = (a * 100) + m
@@ -433,6 +435,17 @@ export class Compteurs {
     let c = 0, ms = 0
     for(let i = 0; i < Compteurs.NHD; i++) { c += this.vd[i][Compteurs.CC]; ms += this.vd[i][Compteurs.MS]; }
     return ms < Compteurs.VALIDMOYC ? -1 : (c / (86400 * 100 * ms))
+  }
+
+  /* retourne le rapport `CR/QC` de la consommation réelle / quota de consommation, 
+  calculés sur le mois en cours et le précédent
+  */
+  get crqc () {
+    const x = this.vd[0][Compteurs.CC] + this.vd[1][Compteurs.CC]
+    const ms = this.vd[0][Compteurs.MS] + this.vd[1][Compteurs.MS]
+    const y = this.qv.qc * (ms / MSPARAN)
+    const r = Math.round(x * 100 / y)
+    return r < 200 ? r : 999
   }
 
   /* Cadeau de dépannage de Comptable / sponsor pour surmonter un excès
