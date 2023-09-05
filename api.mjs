@@ -1,3 +1,4 @@
+/* eslint-disable lines-between-class-members */
 import { encode, decode } from '@msgpack/msgpack'
 
 export const version = '1'
@@ -277,7 +278,7 @@ export function edvol (vol, u) {
 /* Un tarif correspond à,
 - `am`: son premier mois d'application. Un tarif s'applique toujours au premier de son mois.
 - `cu` : [7] un tableau de 7 coûts unitaires `[dt, u1, u2, ul, ue, um, ud]`
-  - 'dt': 365 jours de dotation
+  - 'uc': 365 jours de quota de consommation
   - `u1`: 365 jours de quota q1 (250 notes / chats)
   - `u2`: 365 jours de quota q2 (100Mo)
   - `ul`: 1 million de lectures
@@ -312,11 +313,11 @@ Unités:
 - E : écriture d'un document.
 - € : unité monétaire.
 
-dotation, quotas, volumes `dqv` : `{ dot, q1, q2, nn, nc, ng, v2 }`
+quotas et volumes `qv` : `[ qc, q1, q2, nn, nc, ng, v2 ]`
 consommations `conso` : `{ nl, ne, vm, vd }`
+- `qc`: quota de consommation
 - `q1`: quota du nombre total de notes / chats / groupes.
 - `q2`: quota du volume des fichiers.
-- `dot`: niveau de dotation pour un compte O.
 - `nn`: nombre de notes existantes.
 - `nc`: nombre de chats existants.
 - `ng` : nombre de participations aux groupes existantes.
@@ -326,70 +327,84 @@ consommations `conso` : `{ nl, ne, vm, vd }`
 - `vm`: volume _montant_ vers le Storage (upload).
 - `vd`: volume _descendant_ du Storage (download).
 */
-export class Stats {
-  static lp = ['dh0', 'dh', 'qd', 'vmc', 'mdet', 'mm', 'crmc', 'dbmc', 'crma', 'dbma']
+export class Fact {
+  static NHD = 4 // nombre de mois d'historique détaillé (dont le mois en cours)
+  static NHM = 18 // nombre de mois d'historique des montants des coûts (dont le mois en cours)
 
-  static nqv = ['', 'dot', '', 'q1', 'q2', 'nn', 'nc', 'ng', 'v2']
+  static X1 = 3 // nombre de compteurs de quotas
+  static X2 = 4 // nombre de compteurs de consommation
+  static X3 = 3 // nombre de compteurs techniques dans un vecteur détaillé
+
+  static QC = 0 // quota de consommation
+  static Q1 = 1 // quota du nombre total de notes / chats / groupes.
+  static Q2 = 2 // quota du volume des fichiers.
+  static NN = 3 // nombre de notes existantes.
+  static NC = 4 // nombre de chats existants.
+  static NG = 5 // nombre de participations aux groupes existantes.
+  static V2 = 6 // volume effectif total des fichiers.
+  static NCO = 4 // nombre de compteurs de consommation
+  static NL = 0 // nombre absolu de lectures depuis la création du compte.
+  static NE = 1 // nombre d'écritures.
+  static VM = 2 // volume _montant_ vers le Storage (upload).
+  static VD = 3 // volume _descendant_ du Storage (download).
+  static MS = Fact.X1 + Fact.X2 // nombre de ms dans le mois - si 0, le compte n'était pas créé
+  static CA = Fact.X1 + Fact.X2 + 1 // coût de l'abonnment pour le mois
+  static CC = Fact.X1 + Fact.X2 + 2 // coût de la consommation pour le mois
+
+  static NBCD = Fact.X1 + (2 * Fact.X2) + Fact.X3
+
+  static lp = ['dh0', 'dh', 'qv', 'vd', 'mm', 'aboma', 'consoma']
+
   /*
-  dh0 : date-heure de création
+  dh0 : date-heure de création du compte
   dh : date-heure courante
-  dqv : dotation, quotas, volumes courants `{ dot, q1, q2, nn, nc, ng, v2 }`
-  vmc : [0..12] - vecteur détaillé du mois en cours
-  mdet : [nbmd] - de 0 à 3 vecteurs détaillés pour M-1 M-2 M-3.
-  mm : [nbm] - débits pour les mois antérieurs M-1 ... M-18
-  crmc : crédit du mois en cours
-  dbmc : débit du mois courant
-  crma : somme des crédits des mois antérieurs (depuis la création)
-  dbma : somme des débits des mois antérieurs (depuis la création)
+  qv : quotas et volumes courants `{ qc, q1, q2, nn, nc, ng, v2 }`
+  vd : [0..3] - vecteurs détaillés pour M M-1 M-2 M-3.
+  mm : [0..18] - coût abo + conso pour le mois M et les 17 mois antérieurs (si 0 pour un mois, le compte n'était pas créé)
+  aboma : somme des coûts d'abonnement des mois antérieurs depuis la création du compte
+  consoma : somme des coûts consommation des mois antérieurs depuis la création du compte
 
-  // TODO confusion entre (2) moyenne de dotation et "crédit": somme de la dotation reçue
-  // IL FAUT les deux
-
-  Pour chaque mois, il y a un **vecteur** de 13 compteurs:
+  Pour chaque mois M à M-3, il y a un **vecteur** de 14 (X1 + X2 + X2 + 3) compteurs:
+  - X1_moyennes et X2 cumuls servent au calcul au montant du mois
+    - QC : moyenne de qc dans le mois (€)
+    - Q1 : moyenne de q1 dans le mois (D)
+    - Q2 : moyenne de q2 dans le mois (B)
+    - X1 + NL : nb lectures cumulés sur le mois (L),
+    - X1 + NE : nb écritures cumulés sur le mois (E),
+    - X1 + VM : total des transferts montants (B),
+    - X1 + VD : total des transferts descendants (B).
+  - X2 compteurs de _consommation moyenne sur le mois_ qui n'ont qu'une utilité documentaire.
+    - X2 + NN : nombre moyen de notes existantes.
+    - X2 + NC : nombre moyen de chats existants.
+    - X2 + NG : nombre moyen de participations aux groupes existantes.
+    - X2 + V2 : volume moyen effectif total des fichiers stockés.
   - 3 compteurs spéciaux
-    - 0 : nombre de ms dans le mois (privé)
-    - 1 : débit total du mois (somme des coûts valorisés 3 à 8)
-    - 2 : moyenne de crédit du mois (dotation reçue)
-  - 6 compteurs, 2_moyennes et 4 cumuls_ qui servent au calcul au montant du mois,
-    - 3 : moyenne des valeurs de q1 (D)
-    - 4 : moyenne des valeurs de q2 (B)
-    - 5 : nb lectures cumulés sur le mois (L),
-    - 6 : nb écritures cumulés sur le mois (E),
-    - 7 : total des transferts montants (B),
-    - 8 : total des transferts descendants (B).
-  - 4 compteurs de _moyenne sur le mois_ qui n'ont qu'une utilité statistique documentaire.
-    - 9 : nombre moyen de notes existantes.
-    - 10 : nombre moyen de chats existants.
-    - 11: nombre moyen de participations aux groupes existantes.
-    - 13: volume moyen effectif total des fichiers stockés.
+    - MS : nombre de ms dans le mois - si 0, le compte n'était pas créé
+    - CA : coût de l'abonnement pour le mois
+    - CC : coût de la consommation pour le mois
   */
 
-  constructor (serial, dqv, dh) {
+  constructor (serial, qv, dh) {
     const t = dh || new Date().getTime()
     if (serial) {
       const x = decode(serial)
-      Stats.lp.forEach(p => { this[p] = x[p]})
+      Fact.lp.forEach(p => { this[p] = x[p]})
       this.shift(t)
-      if (dqv) this.dqv = dqv // valeurs à partir de maintenant
+      if (qv) this.qv = qv // valeurs de quotas / volumes à partir de maintenant
     } else { // création - Les quotas sont initialisés, les consommations et montants monétaires nuls
       this.dh0 = t
       this.dh = t
-      this.dqv = dqv
-      this.vmc = new Array(13).fill(0)
-      this.det = []
-      this.mm = new Array[1].fill(0)
-      this.crmc = 0; this.dbmc = 0; this.cdma = 0; this.dbma = 0
+      this.qv = qv
+      this.vd = new Array(Fact.NHD)
+      for(let i = 0; i < Fact.NHD; i++) this.vd[i] = new Array(Fact.NBCD).fill(0)
+      this.mm = new Array[Fact.NHM].fill(0)
+      this.aboma = 0
+      this.consoma = 0
     }
   }
 
-  // somme des crédits apportés par dotation depuis le début de la vie, dont le mois en cours
-  get credits () { return this.crmc + this.crma }
-
-  // somme des coûts d'abonnement et de consommation depuis le début de la vie, dont le mois en cours
-  get debits () { return this.dbmc + this.dbma }
-
   get serial() {
-    const x = {}; Stats.lp.forEach(p => { x[p] = this[p]})
+    const x = {}; Fact.lp.forEach(p => { x[p] = this[p]})
     return new Uint8Array(encode(x))
   }
 
@@ -407,12 +422,10 @@ export class Stats {
       const ap = t - this.dh // ap : temps restant entre dh et t
       // Si l'instant t est dans le mois de création, le nombre de ms AVANT dans le mois est moindre qua avx
       const av = this.dh0 > t0 ? (this.dh - this.dh0) : avx 
-      const v = this.calculMC(av, ap, this.vmc, Tarif.cu(ac, mc))  
-      this.crmc = v[2] // le crédit du mois courant a été recalculé, celui des mois antérieurs est inchangé
-      this.dbmc = v[1] // le débit du mois courant a été recalculé, celui des mois antérieurs est inchangé
-      this.mm[0] = v[1]
-      this.vmc = v
-      this.dh = t
+      const v = this.calculMC(av, ap, this.vd[0], Tarif.cu(ac, mc))  
+      this.mm[0] = v[Fact.CA] + v[Fact.CC] // le cout total du mois courant a changé
+      this.vd[0] = v // le détail du mois courant a changé
+      this.dh = t // la date-heure du dernier calcul a changé
       return
     }
     // le nouveau mois courant est un autre mois
@@ -420,60 +433,59 @@ export class Stats {
     const [a, m] = AMJ.am(t)
     const [ac, mc] = AMJ.am(this.dh)
     const n = this.deltam(ac, mc, a, m) // nombre de mois à créer et calculer (au moins 1, le futur courant)
-    {
+    // init de la structure temporaire vd / mm
+    const _vd = new Array(Fact.NHD)
+    for(let i = 0; i < Fact.NHD; i++) _vd[i] = new Array(Fact.NBCD).fill(0)
+    const _mm = new Array[Fact.NHM].fill(0)
+
+    { 
+      // Mois courant "nouveau"
       const [, msmois, ] = AMJ.t0avap(t) // nb de ms AVANT t
       const v = this.calculNM (a, m, Tarif.cu(a, m), msmois)
       this.crmc = v[2] // le crédit du mois courant a été recalculé
-      this.dbmc = v[1] // le débit du mois courant a été recalculé
-      this.vmc = v
+      _mm[0] = v[Fact.CA] + v[Fact.CC] // le cout total du mois courant a changé
+      _vd[0] = v // le détail du mois courant a changé
     }
-    const mm = []
-    const mdet = []
-    let dbma = 0, crma = 0 // cumuls des débit et crédit des mois antérieurs créés
+
     let ax = a; let mx = m
     for(let i = 1; i < n; i++) {
-      // Moiis intermédiaires à créer APRES le courant (créé ci-dessus) 
-      // et AVANT l'ancien courant recalculé ci-dessous
+      // Mois intermédiaires "nouveaux" à créer APRES le courant (créé ci-dessus) 
+      // et AVANT l'ancien courant recalculé ci-dessous (qui devient antérieur)
       if (mx === 11) { ax++; mx = 1} else mx++
       const msmois = AMJ.djm(ax, mx) * 86400 *100 // nombre de millisecondes du mois
       const v = this.calculNM (ax, mx, Tarif.cu(ax, mx), msmois)
-      mdet.push(v); dbma += v[1]; crma += v[2]
-      mm.push(v[1])
+      this.aboma += v[Fact.CA]
+      this.consoma += v[Fact.CC]
+      if (i < Fact.NHD) _vd[i] = v
+      if (i < Fact.NHM) _mm[i] = v[Fact.CA] + v[Fact.CC] // le cout total du nouveau mois a été calculé
     }
+
     {
-      // Recalcul de l'ancien mois courant, prolongé jusqu'à sa fin
+      // Recalcul de "l'ex" mois courant, prolongé jusqu'à sa fin et devenant antérieur
       // si c'était le mois de création, le nombre de ms AVANT n'est pas avx celui depuis le début du mois
       const av = this.dh0 > t0 ? (this.dh - this.dh0) : avx
-      const v = this.calculMC(av, apx, this.vmc, Tarif.cu(ac, mc))
-      mdet.push(v); dbma += v[1]; crma += v[2]
-      mm.push(v[1])
+      const v = this.calculMC(av, apx, this.vd[0], Tarif.cu(ac, mc))
+      // le mois "ex" courant est dvenu antérieur
+      this.aboma += v[Fact.CA] 
+      this.consoma += v[Fact.CC]
+      if (n < Fact.NHD) _vd[n] = v
+      if (n < Fact.NHM) _mm[n] = v[Fact.CA] + v[Fact.CC] // le cout total de l'ex mois courant a été calculé
     }
-    this.dbma += dbma
-    this.crma += crma
-    /* Recréer mdet et mm - on a ajouté n mois dans l'historique
-    - dans mdet il y en avait mdet.length (il en faut au plus 3)
-    - dans mm il y en avait mm.length (il en faut au plus 18)
+
+    /* completer _vd si nécessaire. On a créé n mois. 
+    - ajouter dans _vd les mois antérieurs dans la limite de NHD
+    - ajouter dans _mm les mois antérieurs dans la limite de NHM
     */
-    {
-      const mq = this.mdet.length - n
-      if (mq > 0) {
-        for(let i = 0; i < mq; i++) mdet.push(this.mdet[i])
-      }
-      this.mdet = []
-      for(let i = 0; i < 3; i++) {
-        if (i < mdet.length) this.mdet.push(mdet[i])
-      }
+    let mq = Fact.NHD - n
+    if (mq > 0) {
+      for(let i = 0; i < mq; i++) _vd[n + i] = this.vd[i]
     }
-    {
-      const mq = this.mm.length - n
-      if (mq > 0) {
-        for(let i = 0; i < mq; i++) mm.push(this.mdet[i])
-      }
-      this.mm = []
-      for(let i = 0; i < 18; i++) {
-        if (i < mm.length) this.mm.push(mm[i])
-      }
+    mq = Fact.NHM - n
+    if (mq > 0) {
+      for(let i = 0; i < mq; i++) _mm[n + i] = this.mm[i]
     }
+    this.vd = _vd
+    this.mm = _mm
   }
 
   moy (av, ap, vav, vap) {
@@ -481,36 +493,42 @@ export class Stats {
   }
 
   calculMC (av, ap, vmc, cu) { // calcul du mois courant par extension
-    const v = new Array(13)
-    v[0] = av + ap // nombre de millisecondes du mois
-    // Les compteurs correspondants à (dot, q1, q2, nn, nc, ng, v2) sont des moyennes
-    // les 4 autres sont des cummuls
-    for(let i = 2; i <= 13; i++) {
-      const np = Stats.nqv[i]
-      if (np) { v[i] = this.moy(av, ap, vmc[i], this.qd[np]) }
-      else v[i] = vmc[i]
-    }
+    const v = new Array(Fact.NBCD).fill(0)
+    v[Fact.MS] = av + ap // nombre de millisecondes du mois
+    // Les X1 premiers compteurs sont des moyennes de quotas
+    for(let i = 0; i <= Fact.X1; i++)
+      v[i] = this.moy(av, ap, vmc[i], this.qv[i])
+    // Les X2 suivants sont des cumuls de consommation
+    for(let i = 0; i <= Fact.X2; i++)
+      v[i + Fact.X1] = vmc[i + Fact.X1]
+    // Les X2 suivants sont des moyennes de consommations
+    for(let i = 0; i <= Fact.X2; i++) 
+      v[i + Fact.X1 + Fact.X2] = this.moy(av, ap, vmc[i + Fact.X1 + Fact.X2], this.qv[Fact.X1 + i])
     let s = 0
-    // calcul du montant depuis les couts unitaires. Seuls les 2 à 8 sont à valoriser
-    // 2 3 4 sont à intégrer sur le temps av + ap, leur cu étant annuel
-    for(let i = 2; i <= 8; i++) {
-      if (i <= 4) s += v[i] * cu[i - 2] * (v[0] / MSPARAN)
-      else s += v[i] * cu[i - 2]
+    /* calcul du montant par multiplication par leur cout unitaire.
+    - pour les X1 premiers le cu est annuel: on le calcule au prorata des ms du mois / ms d'un an
+    */
+    for(let i = 0; i <= Fact.X1 + Fact.X2; i++) {
+      s += v[i] * cu[i] * (i < Fact.X1 ? (v[Fact.MS] / MSPARAN) : 1)
     }
     v[1] = s
     return v
   }
 
   calculNM (a, m, cu, msmois) { // calcul d'un nouveau mois
-    const v = new Array(13)
-    v[0] = msmois// nombre de millisecondes du mois
-    // Les compteurs correspondants à (dot, q1, q2, nn, nc, ng, v2) sont à initialiser
-    // les 4 autres sont des cummuls à mettre à 0
-    for(let i = 2; i <= 13; i++) {
-      const np = Stats.nqv[i]
-      if (np) { v[i] = this.qd[np] }
-      else v[i] = 0
-    }
+    const v = new Array(Fact.NBCD).fill(0)
+    v[Fact.MS] = msmois// nombre de millisecondes du mois
+    // Les X1 premiers compteurs sont des moyennes de quotas à initialiser
+    for(let i = 0; i <= Fact.X1; i++)
+      v[i] = this.qv[i]
+    // Les X2 suivants sont des cumuls de consommation à mettre à 0
+    for(let i = 0; i <= Fact.X2; i++)
+      v[i + Fact.X1] = 0
+    // Les X2 suivants sont des moyennes de consommations à initialiser
+    for(let i = 0; i <= Fact.X2; i++) 
+      v[i + Fact.X1 + Fact.X2] = this.qv[Fact.X1 + i]
+
+    // TODO
     let s = 0
     // calcul du montant depuis les couts unitaires.
     // Seuls 2 3 4 sont à intégrer sur le temps du mois
