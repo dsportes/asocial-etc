@@ -328,6 +328,8 @@ consommations `conso` : `{ nl, ne, vm, vd }`
 - `vd`: volume _descendant_ du Storage (download).
 */
 export class Fact {
+  static VALIDMOYC = 86400 * 1000 * 7
+  
   static NHD = 4 // nombre de mois d'historique détaillé (dont le mois en cours)
   static NHM = 18 // nombre de mois d'historique des montants des coûts (dont le mois en cours)
 
@@ -408,6 +410,27 @@ export class Fact {
     return new Uint8Array(encode(x))
   }
 
+  get totalAbo () { return this.vd[0][Fact.CA] + this.vd[1][Fact.CA] }
+
+  get totalConso () { return this.vd[0][Fact.CC] + this.vd[1][Fact.CC] }
+
+  get totalAboConso () { return this.totalAbo + this.totalConso }
+
+  // Moyenne _journalière_ de la consommation sur le mois en cours et les 3 précédents
+  get moyconso4 () {
+    let c = 0, ms = 0
+    for(let i = 0; i < Fact.NHD; i++) { c += this.vd[i][Fact.CC]; ms += this.vd[i][Fact.MS]; }
+    return ms < Fact.VALIDMOYC ? -1 : (c / (86400 * 100 * ms))
+  }
+
+  /* Cadeau de dépannage de Comptable / sponsor pour surmonter un excès
+  transitoire de consommation.
+  */
+  cadeau (c) {
+    this.consoma -= c
+    return this
+  }
+
   // Méthodes privées
   deltam (ac, mc, a, m) { // nombre de mois entiers entre l'ancien mois courant [ac, mc] et le futur [a, m]
     let n = 0, ax = ac, mx = mc
@@ -453,7 +476,7 @@ export class Fact {
       // et AVANT l'ancien courant recalculé ci-dessous (qui devient antérieur)
       if (mx === 11) { ax++; mx = 1} else mx++
       const msmois = AMJ.djm(ax, mx) * 86400 *100 // nombre de millisecondes du mois
-      const v = this.calculNM (ax, mx, Tarif.cu(ax, mx), msmois)
+      const v = this.calculNM (Tarif.cu(ax, mx), msmois)
       this.aboma += v[Fact.CA]
       this.consoma += v[Fact.CC]
       if (i < Fact.NHD) _vd[i] = v
@@ -504,18 +527,17 @@ export class Fact {
     // Les X2 suivants sont des moyennes de consommations
     for(let i = 0; i <= Fact.X2; i++) 
       v[i + Fact.X1 + Fact.X2] = this.moy(av, ap, vmc[i + Fact.X1 + Fact.X2], this.qv[Fact.X1 + i])
-    let s = 0
     /* calcul du montant par multiplication par leur cout unitaire.
-    - pour les X1 premiers le cu est annuel: on le calcule au prorata des ms du mois / ms d'un an
+    - pour les X1 premiers "abonnement" le cu est annuel: on le calcule au prorata des ms du mois / ms d'un an
     */
     for(let i = 0; i <= Fact.X1 + Fact.X2; i++) {
-      s += v[i] * cu[i] * (i < Fact.X1 ? (v[Fact.MS] / MSPARAN) : 1)
+      const x = v[i] * cu[i] * (i < Fact.X1 ? (v[Fact.MS] / MSPARAN) : 1)
+      v[i < Fact.X1 ? Fact.CA : Fact.CC] += x
     }
-    v[1] = s
     return v
   }
 
-  calculNM (a, m, cu, msmois) { // calcul d'un nouveau mois
+  calculNM (cu, msmois) { // calcul d'un nouveau mois ENTIER
     const v = new Array(Fact.NBCD).fill(0)
     v[Fact.MS] = msmois// nombre de millisecondes du mois
     // Les X1 premiers compteurs sont des moyennes de quotas à initialiser
@@ -528,12 +550,10 @@ export class Fact {
     for(let i = 0; i <= Fact.X2; i++) 
       v[i + Fact.X1 + Fact.X2] = this.qv[Fact.X1 + i]
 
-    // TODO
-    let s = 0
-    // calcul du montant depuis les couts unitaires.
-    // Seuls 2 3 4 sont à intégrer sur le temps du mois
-    for(let i = 2; i <= 4; i++) s += v[i] * cu[i - 2] * (v[0] / MSPARAN)
-    v[1] = s
+    // Seuls les quotas accroissent l'abonnement. Il n'y a pas de consommation
+    for(let i = 0; i <= Fact.X1; i++) {
+      v[Fact.CA] += v[i] * cu[i] * (msmois / MSPARAN)
+    }
     return v
   }
 
