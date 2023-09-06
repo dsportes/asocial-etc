@@ -262,8 +262,13 @@ export class AMJ {
 
   static t0avap (t) { // t0 du début du mois, nombre de ms du début du mois à t, de t à la fin du mois
     const [a, m] = AMJ.am(t)
-    const t0 = new Date(a, m - 1, 1).getTime() // t0 du début du mois
-    const t1 = new Date(t === 12 ? a + 1 : a, t === 12 ? m : 0) // t1 du premier du mois suivant
+    const t0 = Date.UTC(a, m - 1, 1, 0, 0, 0) // t0 du début du mois
+    // console.log(new Date(t0).toISOString())
+    // console.log(new Date(t).toISOString())
+    const a2 = m === 12 ? a + 1 : a
+    const m2 = m === 12 ? 0 : m
+    const t1 = Date.UTC(a2, m2, 1, 0, 0, 0) // t1 du premier du mois suivant
+    // console.log(new Date(t1).toISOString())
     return [t0, t - t0, t1 - t]
   }
 }
@@ -352,9 +357,9 @@ export class Compteurs {
   static NE = 1 // nombre d'écritures.
   static VM = 2 // volume _montant_ vers le Storage (upload).
   static VD = 3 // volume _descendant_ du Storage (download).
-  static MS = Compteurs.X1 + Compteurs.X2 // nombre de ms dans le mois - si 0, le compte n'était pas créé
-  static CA = Compteurs.X1 + Compteurs.X2 + 1 // coût de l'abonnment pour le mois
-  static CC = Compteurs.X1 + Compteurs.X2 + 2 // coût de la consommation pour le mois
+  static MS = Compteurs.X1 + Compteurs.X2 + Compteurs.X2 // nombre de ms dans le mois - si 0, le compte n'était pas créé
+  static CA = Compteurs.MS + 1 // coût de l'abonnment pour le mois
+  static CC = Compteurs.MS + 2 // coût de la consommation pour le mois
 
   static NBCD = Compteurs.X1 + (2 * Compteurs.X2) + Compteurs.X3
 
@@ -414,7 +419,7 @@ export class Compteurs {
       this.qv = qv
       this.vd = new Array(Compteurs.NHD)
       for(let i = 0; i < Compteurs.NHD; i++) this.vd[i] = new Array(Compteurs.NBCD).fill(0)
-      this.mm = new Array[Compteurs.NHM].fill(0)
+      this.mm = new Array(Compteurs.NHM).fill(0)
       this.aboma = 0
       this.consoma = 0
     }
@@ -509,6 +514,7 @@ export class Compteurs {
   shift (t) {
     const [t0, avx, apx] = AMJ.t0avap(this.dh)
     if (t < t0 + avx + apx) {
+      const [ac, mc] = AMJ.am(this.dh)
       // le mois courant n'est pas fini : il est prolongé.
       const ap = t - this.dh // ap : temps restant entre dh et t
       // Si l'instant t est dans le mois de création, le nombre de ms AVANT dans le mois est moindre qua avx
@@ -580,26 +586,31 @@ export class Compteurs {
   }
 
   moy (av, ap, vav, vap) {
-    return (vav * (av / (av + ap))) + (vap * (ap / (av + ap)))
+    return ((vav * av) + (vap * ap)) / (av + ap)
   }
 
   calculMC (av, ap, vmc, cu) { // calcul du mois courant par extension
     const v = new Array(Compteurs.NBCD).fill(0)
     v[Compteurs.MS] = av + ap // nombre de millisecondes du mois
     // Les X1 premiers compteurs sont des moyennes de quotas
-    for(let i = 0; i <= Compteurs.X1; i++)
+    for(let i = 0; i < Compteurs.X1; i++)
       v[i] = this.moy(av, ap, vmc[i], this.qv[Compteurs.lqv[i]])
     // Les X2 suivants sont des cumuls de consommation
-    for(let i = 0; i <= Compteurs.X2; i++)
+    for(let i = 0; i < Compteurs.X2; i++)
       v[i + Compteurs.X1] = vmc[i + Compteurs.X1]
     // Les X2 suivants sont des moyennes de consommations
-    for(let i = 0; i <= Compteurs.X2; i++) 
-      v[i + Compteurs.X1 + Compteurs.X2] = this.moy(av, ap, vmc[i + Compteurs.X1 + Compteurs.X2], this.qv[Compteurs.lqv[Compteurs.X1 + i]])
+    for(let i = 0; i < Compteurs.X2; i++) {
+      const j = i + Compteurs.X1 + Compteurs.X2
+      const y = Compteurs.lqv[Compteurs.X1 + i]
+      v[j] = this.moy(av, ap, vmc[j], this.qv[y])
+    }
     /* calcul du montant par multiplication par leur cout unitaire.
     - pour les X1 premiers "abonnement" le cu est annuel: on le calcule au prorata des ms du mois / ms d'un an
     */
-    for(let i = 0; i <= Compteurs.X1 + Compteurs.X2; i++) {
-      const x = v[i] * cu[i] * (i < Compteurs.X1 ? (v[Compteurs.MS] / MSPARAN) : 1)
+    const px = v[Compteurs.MS] / MSPARAN
+    for(let i = 0; i < Compteurs.X1 + Compteurs.X2; i++) {
+      const p = i < Compteurs.X1 ? px : 1
+      const x = v[i] * cu[i] * p
       v[i < Compteurs.X1 ? Compteurs.CA : Compteurs.CC] += x
     }
     return v
@@ -625,7 +636,43 @@ export class Compteurs {
     return v
   }
 
-  // Nombre de mois détaillés, de 0 à 3
-  get nbmd () { return this.nbm === 1 ? 0 : (this.nbm >= 4 ? 3 : (this.nbm - 1))}
+  printhdr () {
+    const c = this
+    console.log('---------------------------------')
+    console.log('dh =' + new Date(c.dh).toISOString())
+    console.log('dh0=' + new Date(c.dh0).toISOString())
+    const p = `
+  aboma=${c.aboma} consoma=${c.consoma}
+  totalAbo= ${c.totalAbo} totalConso= ${c.totalConso}
+  consoj= ${c.consoj}  consoj4M= ${c.consoj4M}  qcj= ${c.qcj}
+  `
+    console.log(JSON.stringify(c.qv) + p)
+  }
+  
+  printvd (n) {
+    if (!this.vd[n][Compteurs.MS]) return
+    const m = this.vd[n]
+    const p = 
+  `[${n}] abom=${m[Compteurs.CA]}  consom=${m[Compteurs.CC]}
+    moy quotas M: ${m[Compteurs.QC]} ${m[Compteurs.Q1]} ${m[Compteurs.Q2]}
+    vols M: nn=${m[Compteurs.NN]}  nc=${m[Compteurs.NC]}  ng=${m[Compteurs.NG]}  v2=${m[Compteurs.V2]}
+    conso M:  nl=${m[Compteurs.X1 + Compteurs.NL]}  ne=${m[Compteurs.X1 + Compteurs.NE]}  vd=${m[Compteurs.X1 + Compteurs.VD]}  vm=${m[Compteurs.VM]}`
+    console.log(p)
+  }
+
+  printmm () {
+    const r = []
+    for(let m = 0; m < this.mm.length; m++) { 
+      const x = this.mm[m]
+      if (x) r.push(`${m} ${x}`)
+    }
+    console.log('mm  ' + r.join(' | '))
+  }
+
+  print () {
+    this.printhdr()
+    for(let n = 0; n < Compteurs.NHD; n++) this.printvd(n)
+    this.printmm()
+  }
 }
 
