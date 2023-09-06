@@ -3,6 +3,9 @@ import { encode, decode } from '@msgpack/msgpack'
 
 export const version = '1'
 
+export const MSPARJOUR = 86400 * 1000
+export const MSPARAN = 365 * MSPARJOUR
+
 export const d13 = 10 * 1000 * 1000 * 1000 * 1000
 export const d14 = d13 * 10
 
@@ -109,10 +112,10 @@ Une "amj" peut être interprtée comme Loc (locale) ou Utc, ce qu'il faut spéci
 quand on l'utilise pour signifier un instant.
 */
 export class AMJ {
-  static get nbjm () { return [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31] }
+  static lx = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 
-  // Dernier jour du mois M de l'année A
-  static djm (a, m) { return (m === 2) && (a % 4 === 0) ? AMJ.nbjm[m] + 1 : AMJ.nbjm[m] }
+  // Dernier jour du mois M de l'année A (nombre de jours du mois)
+  static djm (a, m) { return (m === 2) && (a % 4 === 0) ? AMJ.lx[m] + 1 : AMJ.lx[m] }
   
   static zp (n) { return n > 9 ? '' + n: '0' + n }
 
@@ -304,8 +307,6 @@ export class Tarif {
   }
 }
 
-const MSPARAN = 365 * 86400 * 1000
-
 /* 
 Unités:
 - T : temps.
@@ -430,23 +431,34 @@ export class Compteurs {
 
   get totalAboConso () { return this.totalAbo + this.totalConso }
 
-  // Moyenne _journalière_ de la consommation sur le mois en cours et les 3 précédents
-  get moyconso4 () {
-    let c = 0, ms = 0
-    for(let i = 0; i < Compteurs.NHD; i++) { c += this.vd[i][Compteurs.CC]; ms += this.vd[i][Compteurs.MS]; }
-    return ms < Compteurs.VALIDMOYC ? -1 : (c / (86400 * 100 * ms))
+  /* retourne la consommation (sans l'abonnement) des mois M et M-1 
+  - ramenée à la journée.
+  - pour M le nombre de jours est le jour du mois, 
+  - pour M-1 c'est le nombre de jours du mois.
+  */
+  get consoj () {
+    const [ac, mc] = AMJ.am(this.dh)
+    const mja = AMJ.djm(mc === 1 ? ac - 1 : ac, mc === 1 ? 12 : mc - 1)
+    const x = this.vd[0][Compteurs.CC] + this.vd[1][Compteurs.CC]
+    return (x / (mc + mja))
   }
 
-  /* retourne le rapport `CR/QC` de la consommation réelle / quota de consommation, 
-  calculés sur le mois en cours et le précédent
-  */
-  get crqc () {
-    const x = this.vd[0][Compteurs.CC] + this.vd[1][Compteurs.CC]
-    const ms = this.vd[0][Compteurs.MS] + this.vd[1][Compteurs.MS]
-    const y = this.qv.qc * (ms / MSPARAN)
-    const r = Math.round(x * 100 / y)
-    return r < 200 ? r : 999
+  /* retourne le quota qc ramené à la journée */
+  get qcj () {
+    return this.qv.qc / MSPARAN * MSPARJOUR
   }
+
+  /* Moyenne _journalière_ de la consommation sur le mois en cours et les 3 précédents
+  Si le nombre de jours d'existance est inférieur à 30, retourne consoj
+  */
+  get consoj4M () {
+    let c = 0, ms = 0
+    for(let i = 0; i < Compteurs.NHD; i++) { c += this.vd[i][Compteurs.CC]; ms += this.vd[i][Compteurs.MS]; }
+    const nbj = Math.floor(ms / MSPARJOUR)
+    return nbj < 30 ? this.consoj : (c / nbj)
+  }
+
+  get cjv1v2 () { return [ this.consoj, this.qv.nn + this.qv.nc + this.qv.ng, this.qv.v2 ]}
 
   /* Cadeau de dépannage de Comptable / sponsor pour surmonter un excès
   transitoire de consommation.
