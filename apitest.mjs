@@ -1,5 +1,5 @@
 // import { AMJ } from './api.mjs'
-import { Compteurs } from './api.mjs'
+import { Compteurs, cleAC, cleOK } from './api.mjs'
 
 let dh, c, qv, conso, ser
 // eslint-disable-next-line no-unused-vars
@@ -40,6 +40,7 @@ function gz (u8) {
   })
 }
 
+// eslint-disable-next-line no-unused-vars
 async function test () {
   try {
     t1()
@@ -52,4 +53,28 @@ async function test () {
   }
 }
 
-test()
+async function test2 () {
+  try { 
+    {
+      const [c, t] = cleAC(838745480320)
+      console.log('cle: ' + c)
+      console.log('ticket: ' + t)
+    }
+    {
+      const [c, t] = cleAC(338769015970)
+      console.log('cle: ' + c)
+      console.log('ticket: ' + t)
+    }
+    {
+      const [c, t] = cleAC(322023092400080)
+      console.log('cle: ' + c)
+      console.log('ticket: ' + t)
+    }
+    console.log( cleOK(322023092400080))
+    console.log( cleOK(322023092400086))
+  } catch (e) {
+    console.log(e)
+  }
+}
+
+test2()
