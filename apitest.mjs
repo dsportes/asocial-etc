@@ -66,12 +66,12 @@ async function test2 () {
       console.log('ticket: ' + t)
     }
     {
-      const [c, t] = cleAC(322023092400080)
+      const [c, t] = cleAC(2023092400080)
       console.log('cle: ' + c)
       console.log('ticket: ' + t)
     }
-    console.log( cleOK(322023092400080))
-    console.log( cleOK(322023092400086))
+    console.log( cleOK(2023092400080))
+    console.log( cleOK(2023092400084))
   } catch (e) {
     console.log(e)
   }
