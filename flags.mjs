@@ -60,6 +60,9 @@ console.log(n.toString(16), edit(n))
 n = 0; n |= FLAGS.HA | FLAGS.AC | FLAGS.IN
 console.log(n.toString(16), edit(n))
 
+console.log("a HA et AC = " + (n & FLAGS.HA) && (n & FLAGS.AC))
+console.log("a HA et HN=" + (n & FLAGS.HA) && (n & FLAGS.HN))
+
 n &= ~FLAGS.AC & ~FLAGS.IN
 n |= FLAGS.HE | FLAGS.HM
 console.log(n.toString(16), edit(n))
