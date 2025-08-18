@@ -39,7 +39,7 @@ async function main () {
     const dr = fs.doc('singletons/ping')
     await dr.set({ dh: new Date().toISOString() })
   } catch (e) {
-      console.log(e)
+    console.log(e)
   }
 }
 
