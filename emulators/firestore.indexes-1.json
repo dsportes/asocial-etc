@@ -1,0 +1,21 @@
+{
+  "indexes": [
+  ],
+  "fieldOverrides": [
+    {
+      "collectionGroup": "singletons",
+      "fieldPath": "id",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "singletons",
+      "fieldPath": "v",
+      "indexes": [{ "order": "ASCENDING", "queryScope": "COLLECTION" }]
+    },
+    {
+      "collectionGroup": "singletons",
+      "fieldPath": "_data_",
+      "indexes": []
+    }
+  ]
+}

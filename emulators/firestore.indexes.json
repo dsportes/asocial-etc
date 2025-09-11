@@ -3,19 +3,34 @@
   ],
   "fieldOverrides": [
     {
-      "collectionGroup": "singletons",
-      "fieldPath": "id",
-      "indexes": []
+      "collectionGroup": "Article",
+      "fieldPath": "pk",
+      "indexes": [{ "order": "ASCENDING", "queryScope": "COLLECTION" }]
     },
     {
-      "collectionGroup": "singletons",
+      "collectionGroup": "Article",
+      "fieldPath": "ck",
+      "indexes": [{ "order": "ASCENDING", "queryScope": "COLLECTION" }]
+    },
+    {
+      "collectionGroup": "Article",
       "fieldPath": "v",
       "indexes": [{ "order": "ASCENDING", "queryScope": "COLLECTION" }]
     },
     {
-      "collectionGroup": "singletons",
-      "fieldPath": "_data_",
-      "indexes": []
+      "collectionGroup": "Article",
+      "fieldPath": "z",
+      "indexes": [{ "order": "ASCENDING", "queryScope": "COLLECTION" }]
+    },
+    {
+      "collectionGroup": "Article",
+      "fieldPath": "auteurs",
+      "indexes": [{ "arrayConfig": "CONTAINS", "queryScope": "COLLECTION" }]
+    },
+    {
+      "collectionGroup": "Article",
+      "fieldPath": "sujet",
+      "indexes": [{ "order": "ASCENDING", "queryScope": "COLLECTION" }]
     }
   ]
 }
