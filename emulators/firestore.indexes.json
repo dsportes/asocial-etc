@@ -9,18 +9,18 @@
     },
     {
       "collectionGroup": "Article",
-      "fieldPath": "ck",
-      "indexes": [{ "order": "ASCENDING", "queryScope": "COLLECTION" }]
-    },
-    {
-      "collectionGroup": "Article",
       "fieldPath": "v",
       "indexes": [{ "order": "ASCENDING", "queryScope": "COLLECTION" }]
     },
     {
       "collectionGroup": "Article",
-      "fieldPath": "z",
-      "indexes": [{ "order": "ASCENDING", "queryScope": "COLLECTION" }]
+      "fieldPath": "ttl",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "Article",
+      "fieldPath": "data",
+      "indexes": []
     },
     {
       "collectionGroup": "Article",
@@ -31,6 +31,21 @@
       "collectionGroup": "Article",
       "fieldPath": "sujet",
       "indexes": [{ "order": "ASCENDING", "queryScope": "COLLECTION" }]
+    },
+    {
+      "collectionGroup": "Article@auteurs",
+      "fieldPath": "val",
+      "indexes": [{ "order": "ASCENDING", "queryScope": "COLLECTION" }]
+    },
+    {
+      "collectionGroup": "Article@auteurs",
+      "fieldPath": "v",
+      "indexes": [{ "order": "ASCENDING", "queryScope": "COLLECTION" }]
+    },
+    {
+      "collectionGroup": "Article@auteurs",
+      "fieldPath": "ttl",
+      "indexes": []
     }
   ]
 }

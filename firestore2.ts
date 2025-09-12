@@ -49,7 +49,7 @@ enum updType { CREATE, UPDATE, SET, DELETE }
 type update = {
   type: updType,
   dr: DocumentReference,
-  row: row
+  row: row | rowRC
 }
 
 class Operation {
@@ -61,7 +61,7 @@ class Operation {
     this.updates = []
   }
 
-  setUpd (type: updType, dr: DocumentReference, row: row) {
+  setUpd (type: updType, dr: DocumentReference, row: row | rowRC) {
     this.updates.push({type, dr, row})
   }
 
@@ -87,69 +87,68 @@ class Operation {
 
 let op : Operation = new Operation()
 
-let colRef: CollectionReference
-
 let time = Date.UTC(2025, 8, 11, 10, 0, 0, 0)
 const time0 = time
 let day = Math.floor(time/ 86400000)
 const day0 = day
 let t = 0
 
+const org = 'demo'
+const clazz = 'Article'
+
 function clockPlus(ms: number) {
   time += ms
   Math.floor(time/ 86400000)
 }
 
-// eslint-disable-next-line no-unused-vars
-async function main1 () {
-  try {
-    const dr = fs.doc('singletons/ping')
-    await dr.set({ dh: new Date().toISOString() })
-  } catch (e) {
-    console.log(e)
-  }
-}
-
-async function main2 () {
-  try {
-    const c1 = fs.collection('ORGS/demo/AVATARS')
-    const pk = 'daniel.sportes'
-    const idh = sha12(pk)
-
-    const dr = c1.doc(sha12(pk))
-    await dr.set({ idh: idh, pk: pk, nom: 'Sportes', v: 2 })
-
-    const q = c1.where('idh', '==', idh).where('v', '>', 1)
-    const qs = await q.get()
-    if (!qs.empty) {
-      const ds = qs.docs[0]
-      const row = ds.data()
-      console.log(row.nom, row.pk)
-    } else {
-      console.log('néant')
-    }
-  } catch (e) {
-    console.log(e)
-  }
-}
-
 type row = {
-  pk?: string,
-  ck?: string,
-  v?: number,
-  z?: number,
-  data?: string
+  pk: string,
+  v: number,
+  ttl?: number
+}
+interface rowD extends row {
+  data: string
+}
+interface rowQ extends row {
+  col: string
 }
 
-interface rowArticle extends row {
-  auteurs: string[],
-  sujet: string
+function docRef (org: string, clazz: string, pk: string) {
+  return fs.doc('Org/'+ org + '/' + clazz + '/' + pk)
 }
 
-async function loadRowArticle (row: rowArticle) {
-  const dr = fs.doc('Org/demo/Article/' + (row.ck || row.pk))
-  op.setUpd(updType.CREATE, dr, row)
+function docRefQ (org: string, clazz: string, col: string, pk: string, val: string) {
+  return fs.doc('Org/'+ org + '/' + clazz + '@' + col + '/' + pk + '@' + val)
 }
+
+function colRef (org: string, clazz: string) {
+  return fs.collection('Org/'+ org + '/' + clazz)
+}
+
+function colRefQ (org: string, clazz: string, colName: string) {
+  return fs.collection('Org/'+ org + '/' + clazz + '@' + colName)
+}
+
+/* Import (insert / create) un row:
+- clazz: classe du document - 'Article'
+- org: code l'organisation - 'demo'
+- row: row
+*/
+async function importRow (ut: updType, org: string, clazz: string, row: row) {
+  op.setUpd(ut, docRef(org, clazz, row.pk), row)
+}
+
+/* Inscrit le rowQ déclarant que le document clazz/pk ne fait plus
+partie de la collection clazz/col à partir de v.
+- clazz: classe du document - 'Article'
+- org: code l'organisation - 'demo'
+- colName: nom de la propriété de sous-collection 
+- row: row - contient pk et col
+*/
+async function importRowQ (org: string, clazz: string, colName: string, row: rowQ) {
+  op.setUpd(updType.SET, docRefQ(org, clazz, colName, row.pk, row.col), row)
+}
+
 
 async function updateArticle ([newRow, pk, ckn], oldRow?: row | null) {
   const vn = newRow['v']
@@ -179,123 +178,159 @@ async function updateArticle ([newRow, pk, ckn], oldRow?: row | null) {
   op.setUpd(updType.SET, dr, newRow)
 }
 
-/* Retourne tous les rows articles existants réellement.
-Ayant une pk et n'étant pas zombi
+/* Retourne tous les rows de la classe indiquée:
+- si v absent: tous ceux existant réellement à l'instant t.
+- si v : présent: ceux mis à jour ou supprimés postérieueremt à v.
+Ceux
 */
-async function tousArticles (v?: number) : Promise<Object[]>{
+async function allRows (org: string, clazz: string, v?: number) : Promise<Object[]>{
   const rows: Object[] = []
+  const cr = colRef(org, clazz)
+  const q: Query = !v ? cr : cr.where('v', '>', v)
+  const qs: QuerySnapshot = op.transaction ? await op.transaction.get(q) : await q.get()
+  if (!qs.empty) for (let doc of qs.docs) {
+    const row = doc.data() as rowD
+    if ((!v && !row.ttl) || v) rows.push(row)
+  }
+  return rows
+}
+
+/* Retourne le row de classe fixée ayant la pk fixée:
+- si v absent: ne retourne pas le row s'il est supprimé
+- si v présent ne retourne le row QUE s'il a été mis à jour ou supprimé après v.
+  si supprimé, le data l'indique.
+*/
+async function oneRow (org: string, clazz: string, pk: string, v?: number) : Promise<rowD | null> {
+  const cr = colRef(org, clazz)
+  const q: Query = !v ? cr : cr.where('v', '>', v)
+  const qs: QuerySnapshot = op.transaction ? await op.transaction.get(q) : await q.get()
+  if (qs.empty) return null
+  const row = qs.docs[0].data() as rowD
+  return (!v && row.ttl) ? null : row
+}
+
+type pkv = [ pk: string, v: number ]
+
+/* Pour la classe 'clazz' (par exemple 'Article'), l'obtention d'une sous-collection
+(par exemple ceux ayant 'Zola' dans sa liste des 'auteurs') - [Article/auteurs/Zola]
+comporte deux listes:
+- une liste D des documents de la classe,
+  - soit faisant partie ACTUELLEMENT de la sous-collection.
+  - soit ayant été supprimés après v.
+  et ayant été modifié postérieurement après v.
+- une liste Q des couples (pk, v) des documents de clé pk ayant quitté la sous-collection 
+  postérieurement à v.
+Il se peut que dans Q soient cités des documents ayant quitté la collection
+à t2 alors qu'ils inscrits comme présents à t3 dans D. Ils sont à ignorer.
+
+Si v est absent:
+- D est la liste INTEGRALE des docuements de la collection à l'instant t.
+- Q est vide.
+
+isList: true si la propriété est une liste.
+*/
+async function getColl(org: string, clazz: string, colName: string, col: string, isList: boolean, v?: number) : Promise<Object[]> {
+  const rows: Object[] = []
+  const lpkv: pkv[] = []
+  const crd = colRef(org, clazz)
+  const crq = colRefQ(org, clazz, colName)
+  const comp = isList ? 'array-contains' : '=='
+
   let q: Query
   if (!v) {
-    q = colRef.where('pk', '!=', false).where('z', '==', 0)
+    q = crd.where(colName, comp, col)
   } else {
-    q = colRef.where('pk', '!=', false).where('v', '>', v).where('z', '==', 0)
+    q = crd.where(colName, comp, col).where('v', '>', v)
   }
   const qs: QuerySnapshot = op.transaction ? await op.transaction.get(q) : await q.get()
-  if (!qs.empty) for (let doc of qs.docs) rows.push(doc.data())
-  return rows
-}
-
-async function getCollLst(prop: string, val: string, v?: number) : Promise<Object[]> {
-  const rows: Object[] = []
-  let q: Query
-  if (!v) {
-    q = colRef.where(prop, 'array-contains', val).where('pk', '!=', false).where('z', '==', 0)
-  } else {
-    q = colRef.where(prop, 'array-contains', val).where('v', '>', v)
+  if (!qs.empty) for (let doc of qs.docs) {
+    const row = doc.data() as rowD
+    if ((!v && !row.ttl) || v) rows.push(row)
   }
-  const qs: QuerySnapshot = op.transaction ? await op.transaction.get(q) : await q.get()
-  if (!qs.empty) for (let doc of qs.docs) rows.push(doc.data())
-  return rows
+
+  if (v) {
+    q = crq.where('col', '==', col).where('v', '>', v)
+    const qs: QuerySnapshot = op.transaction ? await op.transaction.get(q) : await q.get()
+    if (!qs.empty) for (let doc of qs.docs) {
+      const row = doc.data() as rowQ
+      lpkv.push([row.pk, row.v])
+    }
+  }
+
+  return [rows, lpkv]
 }
 
-/* Retourne l'article de pk fixée existant ou zombi réellement.
-*/
-async function getArticlePk (pk: string, v?: number) : Promise<row | null> {
-  const q = colRef.where('pk', '==', pk).where('v', '>', v)
-  const qs: QuerySnapshot = op.transaction ? await op.transaction.get(q) : await q.get()
-  return qs.empty ? null : (qs.docs[0].data() as row)
+function getPk (data: Object, props: string[]) {
+  if (props.length === 1) return sha12(data[props[0]])
+  const t : string[] = []
+  props.forEach(p => { t.push(data[p])})
+  return sha12(t.join('/')) 
 }
 
-/* Retourne l'article de pk fixée existant ou zombi réellement.
-*/
-async function getArticleCk (ck: string) : Promise<row | null> {
-  const q = colRef.where('ck', '==', ck)
-  const qs: QuerySnapshot = op.transaction ? await op.transaction.get(q) : await q.get()
-  return qs.empty ? null : (qs.docs[0].data() as row)
+class Rb {
+  row: rowD
+  data: Object
+  constructor (data: Object, props: string[]) {
+    this.data = data
+    this.row =  {
+      pk: getPk(data, props),
+      v: data['v'],
+      data: JSON.stringify(data)
+    }
+  }
+  addIdx (name: string) {
+    this.row[name] = this.data[name]
+    return this
+  }
 }
 
-/* Retourne tous les rows articles existants ou zombi
-Ayant une pk.
-*/
-async function exportArticles () {
-  const rows: Object[] = []
-  const q = colRef.where('pk', '!=', false)
-  const qs: QuerySnapshot = await q.get()
-  if (!qs.empty) for (let doc of qs.docs) rows.push(doc.data())
-  return rows
+async function importArt (data: Object) {
+  await importRow (updType.CREATE, org, clazz, new Rb(data, ['id']).addIdx('auteurs').addIdx('sujet').row)
 }
 
-function getCk (row: row) { 
-  return '$' + sha12(row.pk + ';' + row['auteurs'].join('/') + ';' + row['sujet'] )
-}
-
-function getPk (data: Object) { return sha12(data['id']) }
-
-function dataToArt (data: Object) : [row, string, string] {
-  const a = dataIdxToArt(data) as row
-  a.v = data['v']
-  a.z = 0
-  a.data = JSON.stringify(data)
-  return [a, getPk(data), getCk(a)]
-}
-
-function dataIdxToArt (data: Object) : rowArticle {
-  return { auteurs: data['auteurs'], sujet: data['sujet'] }
-}
-
-function dataToArtPk (data: Object) : rowArticle {
-  const [a, pk, ] = dataToArt(data)
-  a.pk = pk
-  return a as rowArticle
+function titre (l: string) {
+  console.log('\n time:' + (time - time0) + '   v:' + t + ' ---------------- ' + l)
 }
 
 async function main3 () : Promise<string> {
   try {
-    for(let i = 0; i < 10; i++)
+    for(let i = 0; i < 4; i++)
       await fs.runTransaction(async (tr) => { 
         op = new Operation(tr)
-        await loadRowArticle(dataToArtPk({ id: 'a5' + i, auteurs: ['h', 'v'], sujet: 'S1', v: time + 100 + i, texte: 'blabla' }))
-        await loadRowArticle(dataToArtPk({ id: 'a6' + i, auteurs: ['h'], sujet: 'S1', v: time + 100 + i, texte: 'blublu' }))
+        await importArt({ id: 'a5' + i, auteurs: ['h', 'v'], sujet: 'S1', v: time + 100 + i, texte: 'blabla' })
+        await importArt({ id: 'a6' + i, auteurs: ['h'], sujet: 'S1', v: time + 100 + i, texte: 'blublu' })
         await op.commit()
       })
 
     let rows: Object[]
     let row: Object | null
+    let a52: rowD | null
 
     op = new Operation()
 
-    console.log('\nexportArticles --------------------- ')
-    rows = await exportArticles()
+    titre('allRows')
+    rows = await allRows(org, clazz)
     rows.forEach(r => console.log(JSON.stringify(r)))
 
-    console.log('\ntousArticles --------------------- ')
-    rows = await tousArticles()
+    t = 102 // après les deux premiers articles
+    titre('allRows')
+    rows = await allRows(org, clazz, time + t)
     rows.forEach(r => console.log(JSON.stringify(r)))
 
-    t = 100
-    console.log('\nexportArticles --------------------- ', t)
-    rows = await tousArticles(time0 + t)
-    rows.forEach(r => console.log(JSON.stringify(r)))
-
+    t = 0
+    titre('Article a52')
+    a52 = await oneRow(org, clazz, sha12('a52'))
+    console.log(a52 ? JSON.stringify(a52) : 'NOT FOUND')
+    
     t = 50
-    console.log('\ngetArticle a5 --------------------- ', t)
-    let a5 = await getArticlePk(sha12('a52'), time0 + t)
-    console.log(a5 ? JSON.stringify(a5) : 'NOT FOUND')
+    titre('Article a52')
+    a52 = await oneRow(org, clazz, sha12('a52'), time + t)
+    console.log(a52 ? JSON.stringify(a52) : 'NOT FOUND')
 
-    t = 100
-    console.log('\ngetArticle a5 -------------------- ', t)
-    row = await getArticlePk(sha12('a52'), time0 + t)
-    console.log(row ? JSON.stringify(row) : 'NOT FOUND')
+    t = 110
+    titre('Article a52')
+    a52 = await oneRow(org, clazz, sha12('a52'), time + t)
+    console.log(a52 ? JSON.stringify(a52) : 'NOT FOUND')
 
     t = 0
     console.log('\ngetColl h --------------------- ', t)
