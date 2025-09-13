@@ -22,6 +22,12 @@ En cours d'exécution, on peut faire un export depuis un autre terminal:
   "testsrv": "npx tsx firestore2.ts",
 */
 
+/* TODO
+- gérer les vraies suppressions (purge).
+- gérer FTP.
+- gérer la class LOCK et presetLock.
+*/
+
 import { env } from 'process'
 import { CollectionReference, DocumentReference, Firestore, Query, QuerySnapshot, Timestamp, Transaction } from '@google-cloud/firestore'
 import crypto from 'crypto'
@@ -411,7 +417,7 @@ async function main3 () : Promise<string> {
         rows.forEach(r => console.log(JSON.stringify(r)))
         console.log(JSON.stringify(lpkv))
       }
-      
+
       {
         titre('collection auteurs z')
         const [rows, lpkv] = await getColl(org, clazz, 'auteurs', 'z', true, 0, false)
