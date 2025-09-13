@@ -89,12 +89,11 @@ let op : Operation = new Operation()
 
 let time = Date.UTC(2025, 8, 11, 10, 0, 0, 0)
 const time0 = time
-let day = Math.floor(time/ 86400000)
-const day0 = day
 let t = 0
 
 const org = 'demo'
 const clazz = 'Article'
+const zombiLapse = 90 * 86400 // 90 jours en secondes
 
 function clockPlus(ms: number) {
   time += ms
@@ -148,6 +147,8 @@ partie de la collection clazz/col à partir de v.
 - row: row - contient pk et col
 */
 async function importRowQ (org: string, clazz: string, colName: string, row: rowQ) {
+  const secs = Math.floor(row.v / 1000)
+  row.ttl = new Timestamp(Math.floor(row.v / 1000) + zombiLapse, 0)
   op.setUpd(updType.SET, docRefQ(org, clazz, colName, row.pk, row.col), row)
 }
 
@@ -262,15 +263,13 @@ function getPk (data: Object, props: string[]) {
 class Rb {
   row: rowD
   data: Object
-  constructor (data: Object, props: string[]) {
+  constructor (data: Object, props: string[], zombi?: boolean) {
     this.data = data
-    this.row = {
-      pk: getPk(data, props),
-      v: data['v'],
-      data: JSON.stringify(data)
-    }
+    const v = data['v']
+    this.row = { pk: getPk(data, props), v, data: JSON.stringify(data) }
     const ttl = data['ttl'] // epoch en minutes (sur un entier) de FIN DE VIE
     if (ttl) this.row.ttl = new Timestamp(ttl * 60, 0)
+    if (zombi) this.row.ttl = new Timestamp(Math.floor(v / 1000), 0)
   }
   addIdx (name: string) {
     this.row[name] = this.data[name]
@@ -284,6 +283,10 @@ async function importArt (data: Object) {
 
 async function updateArt (data: Object) {
   await importRow (updType.UPDATE, org, clazz, new Rb(data, ['id']).addIdx('auteurs').addIdx('sujet').row)
+}
+
+async function zombiArt (data: Object) {
+  await importRow (updType.UPDATE, org, clazz, new Rb(data, ['id'], true).row)
 }
 
 async function importHdr (v: number, label: string, status: number) {
@@ -334,6 +337,7 @@ async function main3 () : Promise<string> {
         op = new Operation(tr)
         await importArt({ id: 'a5' + i, auteurs: ['h', 'v'], sujet: 'S1', v: time + 100 + i, texte: 'blabla' })
         await importArt({ id: 'a6' + i, auteurs: ['h'], sujet: 'S1', v: time + 100 + i, texte: 'blublu' })
+        await importArt({ id: 'a7' + i, auteurs: ['z'], sujet: 'S1', v: time + 100 + i, texte: 'blublu' })
         await op.commit()
       })
 
@@ -404,6 +408,37 @@ async function main3 () : Promise<string> {
       {
         titre('collection auteurs h')
         const [rows, lpkv] = await getColl(org, clazz, 'auteurs', 'h', true, 0, false)
+        rows.forEach(r => console.log(JSON.stringify(r)))
+        console.log(JSON.stringify(lpkv))
+      }
+      
+      {
+        titre('collection auteurs z')
+        const [rows, lpkv] = await getColl(org, clazz, 'auteurs', 'z', true, 0, false)
+        rows.forEach(r => console.log(JSON.stringify(r)))
+        console.log(JSON.stringify(lpkv))
+      }
+    }
+
+    clockPlus(1000)
+    if (a52) {
+      await fs.runTransaction(async (tr) => { 
+        op = new Operation(tr)
+        const data = { id: 'a52', v: time }
+        await zombiArt(data)
+        await importRowQ (org, clazz, 'auteurs', { pk: a52.pk, col: 'v', v: time })
+        await importRowQ (org, clazz, 'auteurs', { pk: a52.pk, col: 'z', v: time })
+        op.commit()
+      })
+
+      op = new Operation()
+      titre('Article a52')
+      row = await oneRow(org, clazz, sha12('a52'), 0)
+      console.log(row ? JSON.stringify(row) : 'NOT FOUND')
+
+      {
+        titre('collection auteurs z')
+        const [rows, lpkv] = await getColl(org, clazz, 'auteurs', 'z', true, 0, false)
         rows.forEach(r => console.log(JSON.stringify(r)))
         console.log(JSON.stringify(lpkv))
       }
