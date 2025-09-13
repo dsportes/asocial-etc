@@ -23,7 +23,7 @@ En cours d'exécution, on peut faire un export depuis un autre terminal:
 */
 
 import { env } from 'process'
-import { CollectionReference, DocumentReference, Firestore, Query, QuerySnapshot, Transaction } from '@google-cloud/firestore'
+import { CollectionReference, DocumentReference, Firestore, Query, QuerySnapshot, Timestamp, Transaction } from '@google-cloud/firestore'
 import crypto from 'crypto'
 // import { encode, decode } from '@msgpack/msgpack'
 
@@ -49,7 +49,7 @@ enum updType { CREATE, UPDATE, SET, DELETE }
 type update = {
   type: updType,
   dr: DocumentReference,
-  row: row | rowRC
+  row: rowD | rowQ
 }
 
 class Operation {
@@ -61,7 +61,7 @@ class Operation {
     this.updates = []
   }
 
-  setUpd (type: updType, dr: DocumentReference, row: row | rowRC) {
+  setUpd (type: updType, dr: DocumentReference, row: rowD | rowQ) {
     this.updates.push({type, dr, row})
   }
 
@@ -73,7 +73,7 @@ class Operation {
           break
         }
         case updType.UPDATE : { 
-          if (this.transaction) this.transaction.update(u.dr, u.row); else await u.dr.update(u.row)
+          if (this.transaction) this.transaction.update(u.dr, {...u.row}); else await u.dr.update({...u.row})
           break
         }
         case updType.SET : { 
@@ -104,9 +104,11 @@ function clockPlus(ms: number) {
 type row = {
   pk: string,
   v: number,
-  ttl?: number
+  ttl?: Timestamp
 }
+
 interface rowD extends row {
+  del?: number, // SI existe (!undefined), epoch en MINUTES de suppression DANS LE PASSE
   data: string
 }
 interface rowQ extends row {
@@ -114,7 +116,7 @@ interface rowQ extends row {
 }
 
 function docRef (org: string, clazz: string, pk: string) {
-  return fs.doc('Org/'+ org + '/' + clazz + '/' + pk)
+  return fs.doc((org ? 'Org/'+ org + '/' : '') + clazz + '/' + pk)
 }
 
 function docRefQ (org: string, clazz: string, col: string, pk: string, val: string) {
@@ -122,7 +124,7 @@ function docRefQ (org: string, clazz: string, col: string, pk: string, val: stri
 }
 
 function colRef (org: string, clazz: string) {
-  return fs.collection('Org/'+ org + '/' + clazz)
+  return fs.collection((org ? 'Org/'+ org + '/' : '') + clazz)
 }
 
 function colRefQ (org: string, clazz: string, colName: string) {
@@ -134,7 +136,7 @@ function colRefQ (org: string, clazz: string, colName: string) {
 - org: code l'organisation - 'demo'
 - row: row
 */
-async function importRow (ut: updType, org: string, clazz: string, row: row) {
+async function importRow (ut: updType, org: string, clazz: string, row: rowD | rowQ) {
   op.setUpd(ut, docRef(org, clazz, row.pk), row)
 }
 
@@ -149,48 +151,33 @@ async function importRowQ (org: string, clazz: string, colName: string, row: row
   op.setUpd(updType.SET, docRefQ(org, clazz, colName, row.pk, row.col), row)
 }
 
-
-async function updateArticle ([newRow, pk, ckn], oldRow?: row | null) {
-  const vn = newRow['v']
-  newRow['pk'] = pk
-
-  if (oldRow) {
-    const cko = getCk(oldRow)
-    if (ckn !== cko) {
-      // création / maj de l'article -
-      const row = await getArticleCk(cko)
-      const dr = fs.doc('Org/demo/Article/' + cko)
-      if (row) { // maj de l'article - ; version et zombi repoussées
-        const r = { v: vn, z: day}
-        op.setUpd(updType.UPDATE, dr, r)
-      } else { // création de l'article -
-        const r = dataIdxToArt(JSON.parse(oldRow.data || ''))
-        r.ck = cko
-        r.v = vn 
-        r.z = day
-        r.data = JSON.stringify({ pk: pk, removed: r.v })
-        op.setUpd(updType.CREATE, dr, r)
-      }
-    }
+function normTTL (row: rowD, appttl: boolean | undefined) : rowD {
+  if (row.ttl) {
+    const sec = row.ttl.seconds
+    if ((appttl && ((sec * 1000) < time)) || !appttl) row.del = Math.floor(sec / 60)
+    delete row.ttl
   }
-  // set du nouveau row: soit il n'existait pas, soit il était zombi
-  const dr = fs.doc('Org/demo/Article/' + pk)
-  op.setUpd(updType.SET, dr, newRow)
+  return row
 }
 
 /* Retourne tous les rows de la classe indiquée:
-- si v absent: tous ceux existant réellement à l'instant t.
-- si v : présent: ceux mis à jour ou supprimés postérieueremt à v.
+- si v = 0: tous ceux existant réellement à l'instant t.
+- sinon: ceux mis à jour ou supprimés postérieueremt à v.
+SI appttl, l'application gère le TTL. Un document N'EXISTE PLUS si sa ttl est DEPASSEE.
+Cas standard (appttl absent ou false). Un document N'EXISTE PLUS
+DES QU'IL A UNE TTL (dépassée ou non).
 Ceux
 */
-async function allRows (org: string, clazz: string, v?: number) : Promise<Object[]>{
+async function allRows (org: string, clazz: string, 
+  v: number, appttl?: boolean) : Promise<Object[]>{
+  
   const rows: Object[] = []
   const cr = colRef(org, clazz)
   const q: Query = !v ? cr : cr.where('v', '>', v)
   const qs: QuerySnapshot = op.transaction ? await op.transaction.get(q) : await q.get()
   if (!qs.empty) for (let doc of qs.docs) {
-    const row = doc.data() as rowD
-    if ((!v && !row.ttl) || v) rows.push(row)
+    const row = normTTL(doc.data() as rowD, appttl)
+    if ((!v && !row.del) || v) rows.push(row)
   }
   return rows
 }
@@ -200,13 +187,15 @@ async function allRows (org: string, clazz: string, v?: number) : Promise<Object
 - si v présent ne retourne le row QUE s'il a été mis à jour ou supprimé après v.
   si supprimé, le data l'indique.
 */
-async function oneRow (org: string, clazz: string, pk: string, v?: number) : Promise<rowD | null> {
+async function oneRow (org: string, clazz: string, 
+  pk: string, v: number, appttl?: boolean) : Promise<rowD | null> {
+  
   const cr = colRef(org, clazz)
-  const q: Query = !v ? cr : cr.where('v', '>', v)
+  const q: Query = !v ? cr.where('pk', '==', pk) : cr.where('pk', '==', pk).where('v', '>', v)
   const qs: QuerySnapshot = op.transaction ? await op.transaction.get(q) : await q.get()
   if (qs.empty) return null
-  const row = qs.docs[0].data() as rowD
-  return (!v && row.ttl) ? null : row
+  const row = normTTL(qs.docs[0].data() as rowD, appttl)
+  return (!v && row.del) ? null : row
 }
 
 type pkv = [ pk: string, v: number ]
@@ -229,8 +218,10 @@ Si v est absent:
 
 isList: true si la propriété est une liste.
 */
-async function getColl(org: string, clazz: string, colName: string, col: string, isList: boolean, v?: number) : Promise<Object[]> {
-  const rows: Object[] = []
+async function getColl(org: string, clazz: string, 
+  colName: string, col: string, isList: boolean, v: number, appttl?: boolean) : Promise<[rowD[], pkv[]]> {
+  
+  const rows: rowD[] = []
   const lpkv: pkv[] = []
   const crd = colRef(org, clazz)
   const crq = colRefQ(org, clazz, colName)
@@ -244,8 +235,9 @@ async function getColl(org: string, clazz: string, colName: string, col: string,
   }
   const qs: QuerySnapshot = op.transaction ? await op.transaction.get(q) : await q.get()
   if (!qs.empty) for (let doc of qs.docs) {
-    const row = doc.data() as rowD
-    if ((!v && !row.ttl) || v) rows.push(row)
+    const x = doc.data() as rowD
+    const row = normTTL(x, appttl)
+    if ((!v && !row.del) || v) rows.push(row)
   }
 
   if (v) {
@@ -272,11 +264,13 @@ class Rb {
   data: Object
   constructor (data: Object, props: string[]) {
     this.data = data
-    this.row =  {
+    this.row = {
       pk: getPk(data, props),
       v: data['v'],
       data: JSON.stringify(data)
     }
+    const ttl = data['ttl'] // epoch en minutes (sur un entier) de FIN DE VIE
+    if (ttl) this.row.ttl = new Timestamp(ttl * 60, 0)
   }
   addIdx (name: string) {
     this.row[name] = this.data[name]
@@ -288,12 +282,53 @@ async function importArt (data: Object) {
   await importRow (updType.CREATE, org, clazz, new Rb(data, ['id']).addIdx('auteurs').addIdx('sujet').row)
 }
 
+async function updateArt (data: Object) {
+  await importRow (updType.UPDATE, org, clazz, new Rb(data, ['id']).addIdx('auteurs').addIdx('sujet').row)
+}
+
+async function importHdr (v: number, label: string, status: number) {
+  await importRow (updType.CREATE, '', 'ROOT', { pk: 'hdr', v: v, data: JSON.stringify({ v, label, status})})
+}
+
+function trap (e: any) : [number, string] { // 1: busy, 2: autre
+  if (e.constructor.name !== 'FirestoreError') throw e
+  const s = (e.code || '???') + ' - ' + (e.message || '?')
+  if (e.code && e.code === 'ABORTED') return [1, s]
+  return [2, s]
+}
+
+async function ping () : Promise<[number, string]> {
+  try {
+    let t = '?'
+    const dr = docRef('', 'ROOT', 'ping')
+    const ds = await dr.get()
+    if (ds.exists) t = ds.get('data')
+    const v = time
+    const data = new Date(v).toISOString()
+    await dr.set({ v, data })
+    return [0, 'Firestore ping OK: ' + (t || '?') + ' <=> ' + data]
+  } catch (e) {
+    return trap(e)
+  }
+}
+
 function titre (l: string) {
   console.log('\n time:' + (time - time0) + '   v:' + t + ' ---------------- ' + l)
 }
 
 async function main3 () : Promise<string> {
   try {
+    console.log('PING: ' + (await ping())[1])
+
+    clockPlus(10)
+    console.log('PING: ' + (await ping())[1])
+
+    await fs.runTransaction(async (tr) => { 
+      op = new Operation(tr)
+      await importHdr(time, 'serveur toto', 1)
+      await op.commit()
+    })
+
     for(let i = 0; i < 4; i++)
       await fs.runTransaction(async (tr) => { 
         op = new Operation(tr)
@@ -302,14 +337,14 @@ async function main3 () : Promise<string> {
         await op.commit()
       })
 
-    let rows: Object[]
-    let row: Object | null
-    let a52: rowD | null
-
     op = new Operation()
 
+    let rows: Object[]
+    let row: rowD | null
+    let a52: rowD | null
+
     titre('allRows')
-    rows = await allRows(org, clazz)
+    rows = await allRows(org, clazz, 0)
     rows.forEach(r => console.log(JSON.stringify(r)))
 
     t = 102 // après les deux premiers articles
@@ -319,75 +354,60 @@ async function main3 () : Promise<string> {
 
     t = 0
     titre('Article a52')
-    a52 = await oneRow(org, clazz, sha12('a52'))
-    console.log(a52 ? JSON.stringify(a52) : 'NOT FOUND')
+    row = await oneRow(org, clazz, sha12('a52'), 0)
+    console.log(row ? JSON.stringify(row) : 'NOT FOUND')
+    a52 = row
     
     t = 50
     titre('Article a52')
-    a52 = await oneRow(org, clazz, sha12('a52'), time + t)
-    console.log(a52 ? JSON.stringify(a52) : 'NOT FOUND')
+    row = await oneRow(org, clazz, sha12('a52'), time + t)
+    console.log(row ? JSON.stringify(row) : 'NOT FOUND')
 
     t = 110
     titre('Article a52')
-    a52 = await oneRow(org, clazz, sha12('a52'), time + t)
-    console.log(a52 ? JSON.stringify(a52) : 'NOT FOUND')
+    row = await oneRow(org, clazz, sha12('a52'), time + t)
+    console.log(row ? JSON.stringify(row) : 'NOT FOUND')
 
-    t = 0
-    console.log('\ngetColl h --------------------- ', t)
-    rows = await getCollLst('auteurs', 'h', 0)
-    rows.forEach(r => console.log(JSON.stringify(r)))
-
-    t = 100
-    console.log('\ngetColl h --------------------- ', t)
-    rows = await getCollLst('auteurs', 'h', time0 + t)
-    rows.forEach(r => console.log(JSON.stringify(r)))
+    {
+      titre('collection auteurs h')
+      const [rows, lpkv] = await getColl(org, clazz, 'auteurs', 'h', true, 0, false)
+      rows.forEach(r => console.log(JSON.stringify(r)))
+      console.log(JSON.stringify(lpkv))
+    }
 
     clockPlus(1000)
-    if (a5) {
+    if (a52) {
       await fs.runTransaction(async (tr) => { 
         op = new Operation(tr)
-        const dataA5 = a5 ? JSON.parse(a5.data || '') : {}
-        dataA5['texte'] = 'blibli'
-        dataA5['v'] = time + 100
-        dataA5['auteurs'] = ['v', 'z']
-        await updateArticle(dataToArt(dataA5), a5)
+        const data = JSON.parse(a52.data)
+        data['texte'] = 'blibli'
+        data['v'] = time + 100
+        data['auteurs'] = ['v', 'z']
+        await updateArt(data)
+        const rowQ : rowQ = { pk: a52.pk, col: 'h', v: time }
+        await importRowQ (org, clazz, 'auteurs', rowQ)
         op.commit()
       })
-      
+
       op = new Operation()
-      
-      t = 99
-      console.log('\ngetArticle a5 --------------------- ', t)
-      a5 = await getArticlePk(sha12('a52'), time0 + 99)
+      titre('Article a52')
+      row = await oneRow(org, clazz, sha12('a52'), 0)
       console.log(row ? JSON.stringify(row) : 'NOT FOUND')
-      
+
+      {
+        titre('collection auteurs h')
+        const [rows, lpkv] = await getColl(org, clazz, 'auteurs', 'h', true, time - 1, false)
+        rows.forEach(r => console.log(JSON.stringify(r)))
+        console.log(JSON.stringify(lpkv))
+      }
+
+      {
+        titre('collection auteurs h')
+        const [rows, lpkv] = await getColl(org, clazz, 'auteurs', 'h', true, 0, false)
+        rows.forEach(r => console.log(JSON.stringify(r)))
+        console.log(JSON.stringify(lpkv))
+      }
     }
-    /*
-    t = 0
-    console.log('\ntousArticles --------------------- ', t)
-    rows = await tousArticles()
-    rows.forEach(r => console.log(JSON.stringify(r)))
-    */
-    t = 99
-    console.log('\ngetColl h --------------------- ', t)
-    rows = await getCollLst('auteurs', 'h', time0 + 99)
-    rows.forEach(r => console.log(JSON.stringify(r)))
-
-    if (a5) await fs.runTransaction(async (tr) => { 
-        op = new Operation(tr)
-        const dataA5 = JSON.parse(a5.data || '')
-        dataA5['texte'] = 'blibli'
-        dataA5['v'] = time + 110
-        dataA5['auteurs'] = ['h', 'v', 'z']
-        await updateArticle(dataToArt(dataA5), a5)
-        op.commit()
-      })
-
-    op = new Operation()
-    t = 99
-    console.log('\ngetColl h --------------------- ', t)
-    rows = await getCollLst('auteurs', 'h', time0 + 99)
-    rows.forEach(r => console.log(JSON.stringify(r)))
 
     return 'OK'
   } catch (e) {
@@ -397,7 +417,6 @@ async function main3 () : Promise<string> {
 }
 
 setTimeout(async () => {
-  colRef = fs.collection('Org/demo/Article')
   const res = await main3()
   console.log(res)
 }, 10)
