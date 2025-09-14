@@ -29,7 +29,7 @@ En cours d'exécution, on peut faire un export depuis un autre terminal:
 */
 
 import { env } from 'process'
-import { CollectionReference, DocumentReference, Firestore, Query, QuerySnapshot, Timestamp, Transaction } from '@google-cloud/firestore'
+import { FieldPath, DocumentReference, Firestore, Query, QuerySnapshot, Timestamp, Transaction, WhereFilterOp } from '@google-cloud/firestore'
 import crypto from 'crypto'
 // import { encode, decode } from '@msgpack/msgpack'
 
@@ -55,7 +55,7 @@ enum updType { CREATE, UPDATE, SET, DELETE }
 type update = {
   type: updType,
   dr: DocumentReference,
-  row: rowD | rowQ
+  row: row | rowQ
 }
 
 class Operation {
@@ -67,7 +67,7 @@ class Operation {
     this.updates = []
   }
 
-  setUpd (type: updType, dr: DocumentReference, row: rowD | rowQ) {
+  setUpd (type: updType, dr: DocumentReference, row: row | rowQ) {
     this.updates.push({type, dr, row})
   }
 
@@ -106,26 +106,66 @@ function clockPlus(ms: number) {
   Math.floor(time/ 86400000)
 }
 
-type row = {
-  pk: string,
+type rowQ = {
+  pk?: string,
+  ttl?: Timestamp, // DB seulement - TTL pour purge automatique par la DB
   v: number,
-  ttl?: Timestamp
+  col: string
 }
 
-interface rowD extends row {
-  del?: number, // SI existe (!undefined), epoch en MINUTES de suppression DANS LE PASSE
+type row = {
+  pk: string, // primary key (hash)
+  v: number, // version: time de la dernière opération de création / maj / suppression
+  maxLife?: number, // time de fin de vie programmée par l'application (précision en minutes)
+  ttl?: Timestamp, // DB seulement - TTL pour purge automatique par la DB
+  deleted?: boolean, // APP seulement - document supprimé
   data: string
 }
-interface rowQ extends row {
-  col: string
+
+/* Transforme un row DB en row APP
+- calcul du TTL éventuel
+- supprime deleted
+- convertit maxLife en minutes
+Retourne le row : v maxLife? ttl?
+*/
+function rowToDB (row: row) : row {
+  if (!row.deleted && !row.maxLife) return row
+  if (row.deleted){
+    if (row.maxLife) delete row.maxLife
+    delete row.deleted
+    row.ttl = new Timestamp(Math.floor(row.v / 1000) + zombiLapse, 0)
+    return row
+  }
+  if (!row.maxLife) return row
+  if (row.maxLife > time) {
+    row.ttl = new Timestamp(Math.floor(row.maxLife / 1000) + zombiLapse, 0)
+    delete row.maxLife
+    return row
+  }
+  row.maxLife = Math.floor(row.maxLife / 1440000) // en minutes (integer 32)
+  return row
+}
+
+/* Transforme un row DB en row APP
+- calcul de deleted 
+- convertit maxLife en ms
+Retourne le row (v, maxLife?, deleted?): si date de purge (ttl) dépassée retourne null
+*/
+function rowToAPP (row: row) : row | null{
+  if (row.maxLife) row.maxLife = row.maxLife * 1440000
+  if (!row.ttl) return row
+  if (row.ttl.seconds * 1000 < time) return null
+  if (!row.maxLife) { row.deleted = true; return row }
+  if (row.maxLife < time) { delete row.maxLife; row.deleted = true }
+  return row
 }
 
 function docRef (org: string, clazz: string, pk: string) {
   return fs.doc((org ? 'Org/'+ org + '/' : '') + clazz + '/' + pk)
 }
 
-function docRefQ (org: string, clazz: string, col: string, pk: string, val: string) {
-  return fs.doc('Org/'+ org + '/' + clazz + '@' + col + '/' + pk + '@' + val)
+function docRefQ (org: string, clazz: string, colName: string, pk: string, col: string) {
+  return fs.doc('Org/'+ org + '/' + clazz + '@' + colName + '/' + pk + '@' + col)
 }
 
 function colRef (org: string, clazz: string) {
@@ -136,13 +176,131 @@ function colRefQ (org: string, clazz: string, colName: string) {
   return fs.collection('Org/'+ org + '/' + clazz + '@' + colName)
 }
 
+type expList = {
+  rows: row[],
+  eox: boolean, // true si l'export est terminé (plus de documents à exporter)
+  lastMark: string // dernière pk exportée
+}
+
+/* Exportation des rows n'ayant pas dépassé leur TTL
+mark: dont les pk sont > pk
+limit: nombre max de rows lus
+Retourne:
+  rows : la liste des rows
+  eox: true si le nombre de rows exportés n'a pas atteint la limite
+  lastMark: dernière pk lue
+ATTENTION !!! mark ne doit pas être '' (mettre '0' pour commencer)
+*/
+async function exportRows (org: string, clazz: string, mark: string, limit: number) : Promise<expList> {
+  let n = 0
+  let lastMark = ''
+  const rows: row[] = []
+  const cr = colRef(org, clazz)
+  const fp = FieldPath.documentId()
+  const q: Query = cr.where(fp, '>', mark).orderBy(fp).limit(limit)
+  const qs: QuerySnapshot = await q.get()
+  if (!qs.empty) for (let doc of qs.docs) {
+    n++
+    lastMark = doc.id
+    const row = rowToAPP(doc.data() as row)
+    if (row) rows.push(row)
+  }
+  return { rows, eox: n < limit, lastMark} 
+}
+
+/* Purge limit documents - Retourne true si la limite n'a pas été atteinte (fini)
+*/
+async function purgeRows (org: string, clazz: string, limit: number) : Promise<boolean> {
+  let n = 0
+  const cr = colRef(org, clazz)
+  const fp = FieldPath.documentId()
+  const q: Query = cr.limit(limit)
+  const qs: QuerySnapshot = await q.get()
+  const eop = qs.docs.length < limit
+  if (!qs.empty) for (let doc of qs.docs)
+    await doc.ref.delete()
+  return eop
+}
+
+async function importRows (org: string, clazz: string, rows: row[]) {
+  for(const row of rows) {
+    const r = rowToDB(row)
+    const dr = docRef(org, clazz, r.pk)
+    await dr.create(r)
+  }
+}
+
+type expListQ = {
+  rows: rowQ[],
+  eox: boolean, // true si l'export est terminé (plus de documents à exporter)
+  lastMark: string // dernière pk exportée
+}
+
+/* Exportation des rows n'ayant pas dépassé leur TTL
+mark: dont les id sont > mark
+limit: nombre max de rows lus
+Retourne:
+  rows : la liste des rows
+  eox: true si le nombre de rows exportés n'a pas atteint la limite
+  mark: dernière pk@col lue
+*/
+async function exportRowsQ (org: string, clazz: string, colName: string, mark: string, limit: number) 
+  : Promise<expListQ> {
+  let n = 0
+  let lastMark = ''
+  const rows: rowQ[] = []
+  const cq = colRefQ(org, clazz, colName)
+  const fp = FieldPath.documentId()
+  const q: Query = cq.where(fp, '>', mark).orderBy(fp).limit(limit)
+
+  const qs: QuerySnapshot = await q.get()
+  if (!qs.empty) for (let doc of qs.docs) {
+    n++
+    lastMark = doc.id
+    const ttl = doc.get('ttl') as Timestamp
+    if (ttl.seconds * 1000 > time) {
+      const v = doc.get('v')
+      const col = doc.get('col')
+      const pk = doc.id.substring(0, doc.id.indexOf('@'))
+      rows.push({pk, col, v})
+    }
+  }
+  return { rows, eox: n < limit, lastMark} 
+}
+
+/* Purge limit documents - Retourne true si la limite n'a pas été atteinte (fini)
+*/
+async function purgeRowsQ (org: string, clazz: string, colName: string, limit: number) : Promise<boolean> {
+  let n = 0
+  const cq = colRefQ(org, clazz, colName)
+  const fp = FieldPath.documentId()
+  const q: Query = cq.limit(limit)
+  const qs: QuerySnapshot = await q.get()
+  const eop = qs.docs.length < limit
+  if (!qs.empty) for (let doc of qs.docs)
+    await doc.ref.delete()
+  return eop
+}
+
+async function importRowsQ (org: string, clazz: string, colName: string, rows: rowQ[]) {
+  for(const row of rows) {
+    const dr = docRefQ(org, clazz, colName, row.pk || '', row.col)
+    const r : rowQ = { 
+      col: row.col, 
+      v: row.v,
+      ttl:  new Timestamp(Math.floor(row.v / 1000) + zombiLapse, 0)
+    }
+    await dr.create(r)
+  }
+}
+
 /* Import (insert / create) un row:
 - clazz: classe du document - 'Article'
 - org: code l'organisation - 'demo'
 - row: row
 */
-async function importRow (ut: updType, org: string, clazz: string, row: rowD | rowQ) {
-  op.setUpd(ut, docRef(org, clazz, row.pk), row)
+async function writeRow (ut: updType, org: string, clazz: string, row: row) {
+  op.setUpd(ut, docRef(org, clazz, row.pk), rowToDB(row))
 }
 
 /* Inscrit le rowQ déclarant que le document clazz/pk ne fait plus
@@ -150,41 +308,32 @@ partie de la collection clazz/col à partir de v.
 - clazz: classe du document - 'Article'
 - org: code l'organisation - 'demo'
 - colName: nom de la propriété de sous-collection 
-- row: row - contient pk et col
+- row APP: { v, col, pk }
+Path: Org/demo/Article@auteurs/a5@Hugo
+row DB: { v, col, ttl }
 */
-async function importRowQ (org: string, clazz: string, colName: string, row: rowQ) {
-  const secs = Math.floor(row.v / 1000)
-  row.ttl = new Timestamp(Math.floor(row.v / 1000) + zombiLapse, 0)
-  op.setUpd(updType.SET, docRefQ(org, clazz, colName, row.pk, row.col), row)
-}
-
-function normTTL (row: rowD, appttl: boolean | undefined) : rowD {
-  if (row.ttl) {
-    const sec = row.ttl.seconds
-    if ((appttl && ((sec * 1000) < time)) || !appttl) row.del = Math.floor(sec / 60)
-    delete row.ttl
+async function writeRowQ (org: string, clazz: string, colName: string, row: rowQ) {
+  const r : rowQ = { 
+    col: row.col, 
+    v: row.v,
+    ttl:  new Timestamp(Math.floor(row.v / 1000) + zombiLapse, 0)
   }
-  return row
+  op.setUpd(updType.SET, docRefQ(org, clazz, colName, row.pk || '', row.col), r)
 }
 
 /* Retourne tous les rows de la classe indiquée:
 - si v = 0: tous ceux existant réellement à l'instant t.
 - sinon: ceux mis à jour ou supprimés postérieueremt à v.
-SI appttl, l'application gère le TTL. Un document N'EXISTE PLUS si sa ttl est DEPASSEE.
-Cas standard (appttl absent ou false). Un document N'EXISTE PLUS
-DES QU'IL A UNE TTL (dépassée ou non).
-Ceux
 */
-async function allRows (org: string, clazz: string, 
-  v: number, appttl?: boolean) : Promise<Object[]>{
+async function allRows (org: string, clazz: string, v: number) : Promise<Object[]>{
   
-  const rows: Object[] = []
+  const rows: row[] = []
   const cr = colRef(org, clazz)
   const q: Query = !v ? cr : cr.where('v', '>', v)
   const qs: QuerySnapshot = op.transaction ? await op.transaction.get(q) : await q.get()
   if (!qs.empty) for (let doc of qs.docs) {
-    const row = normTTL(doc.data() as rowD, appttl)
-    if ((!v && !row.del) || v) rows.push(row)
+    const row = rowToAPP(doc.data() as row)
+    if (row && (v || !row.deleted)) rows.push(row)
   }
   return rows
 }
@@ -192,43 +341,45 @@ async function allRows (org: string, clazz: string,
 /* Retourne le row de classe fixée ayant la pk fixée:
 - si v absent: ne retourne pas le row s'il est supprimé
 - si v présent ne retourne le row QUE s'il a été mis à jour ou supprimé après v.
-  si supprimé, le data l'indique.
+  si supprimé , le data l'indique.
 */
-async function oneRow (org: string, clazz: string, 
-  pk: string, v: number, appttl?: boolean) : Promise<rowD | null> {
-  
+async function oneRow (org: string, clazz: string, pk: string, v: number) : Promise<row | null> {
   const cr = colRef(org, clazz)
   const q: Query = !v ? cr.where('pk', '==', pk) : cr.where('pk', '==', pk).where('v', '>', v)
   const qs: QuerySnapshot = op.transaction ? await op.transaction.get(q) : await q.get()
   if (qs.empty) return null
-  const row = normTTL(qs.docs[0].data() as rowD, appttl)
-  return (!v && row.del) ? null : row
+  const row = rowToAPP(qs.docs[0].data() as row)
+  return !row || (!v && row.deleted) ? null : row
 }
 
 type pkv = [ pk: string, v: number ]
 
-/* Pour la classe 'clazz' (par exemple 'Article'), l'obtention d'une sous-collection
-(par exemple ceux ayant 'Zola' dans sa liste des 'auteurs') - [Article/auteurs/Zola]
-comporte deux listes:
-- une liste D des documents de la classe,
-  - soit faisant partie ACTUELLEMENT de la sous-collection.
-  - soit ayant été supprimés après v.
-  et ayant été modifié postérieurement après v.
-- une liste Q des couples (pk, v) des documents de clé pk ayant quitté la sous-collection 
-  postérieurement à v.
-Il se peut que dans Q soient cités des documents ayant quitté la collection
-à t2 alors qu'ils inscrits comme présents à t3 dans D. Ils sont à ignorer.
+/* Retourne la sous-collection 'clazz/colName/col' (par exemple: Article/auteurs/Zola)
+sous la forme de deux listes:
+- une liste D des documents de la classe clazz,
+- une liste Q des couples (pk, v) des documents ayant quitté la sous-collection.
 
 Si v est absent:
-- D est la liste INTEGRALE des docuements de la collection à l'instant t.
+- D: liste INTEGRALE des documents de la sous-collection à l'instant t.
 - Q est vide.
 
-isList: true si la propriété est une liste.
+Si v est présent:
+- D: liste des documents ayant 'Zola' dans sa liste d'auteurs,
+  - créés après v.
+  - modifiés après v.
+  - zombifiés après v.
+- Q: liste des couples (pk, v) des documents de clé pk,
+  - ayant quitté la sous-collection postérieurement à v (possiblement par zombification).
+Il se peut que dans Q soient cités des documents ayant quitté la collection
+à t2 alors qu'ils inscrits comme présents à t3 dans D. Ils sont à ignorer (D l'emporte sur Q)
+
+isList: true si la propriété 'auteurs' est une liste.
+appttl: true si la ttl est gérée par l'application
 */
 async function getColl(org: string, clazz: string, 
-  colName: string, col: string, isList: boolean, v: number, appttl?: boolean) : Promise<[rowD[], pkv[]]> {
+  colName: string, col: string, isList: boolean, v: number) : Promise<[row[], pkv[]]> {
   
-  const rows: rowD[] = []
+  const rows: row[] = []
   const lpkv: pkv[] = []
   const crd = colRef(org, clazz)
   const crq = colRefQ(org, clazz, colName)
@@ -242,23 +393,41 @@ async function getColl(org: string, clazz: string,
   }
   const qs: QuerySnapshot = op.transaction ? await op.transaction.get(q) : await q.get()
   if (!qs.empty) for (let doc of qs.docs) {
-    const x = doc.data() as rowD
-    const row = normTTL(x, appttl)
-    if ((!v && !row.del) || v) rows.push(row)
+    const row = rowToAPP(doc.data() as row)
+    if (row && (v || !row.deleted)) rows.push(row)
   }
 
   if (v) {
     q = crq.where('col', '==', col).where('v', '>', v)
     const qs: QuerySnapshot = op.transaction ? await op.transaction.get(q) : await q.get()
     if (!qs.empty) for (let doc of qs.docs) {
-      const row = doc.data() as rowQ
-      lpkv.push([row.pk, row.v])
+      const ttl = doc.get('ttl') as Timestamp
+      if (ttl.seconds * 1000 > time) {
+        const v = doc.get('v')
+        const pk = doc.id.substring(0, doc.id.indexOf('@'))
+        lpkv.push([pk, v])
+      }
     }
   }
 
   return [rows, lpkv]
 }
 
+enum filter { LT, LE, EQ, NE, GE, GT, CONTAINS, CONTAINSANY }
+const opFilter = [ '<', '<=', '==', '!=', '>=', '>', 'array-contains', 'array-contains-any']
+
+async function selectDocs(org: string, clazz: string, colName: string, filter: filter, col: any, 
+  fn: Function) {
+  
+  const q: Query = colRef(org, clazz).where(colName, opFilter[filter] as WhereFilterOp, col)
+  const qs: QuerySnapshot = op.transaction ? await op.transaction.get(q) : await q.get()
+  if (!qs.empty) for (let doc of qs.docs) {
+    const row = rowToAPP(doc.data() as row)
+    fn(row)
+  }
+}
+
+// Simulation de la couche au-dessus
 function getPk (data: Object, props: string[]) {
   if (props.length === 1) return sha12(data[props[0]])
   const t : string[] = []
@@ -267,15 +436,18 @@ function getPk (data: Object, props: string[]) {
 }
 
 class Rb {
-  row: rowD
+  row: row
   data: Object
-  constructor (data: Object, props: string[], zombi?: boolean) {
+  constructor (data: Object, props: string[]) {
     this.data = data
-    const v = data['v']
-    this.row = { pk: getPk(data, props), v, data: JSON.stringify(data) }
-    const ttl = data['ttl'] // epoch en minutes (sur un entier) de FIN DE VIE
-    if (ttl) this.row.ttl = new Timestamp(ttl * 60, 0)
-    if (zombi) this.row.ttl = new Timestamp(Math.floor(v / 1000), 0)
+    this.row = { 
+      pk: getPk(data, props), 
+      v: data['v'],
+      data: JSON.stringify(data)
+    }
+    if (data['deleted']) this.row.deleted = true
+    const ml = data['maxLife'] // epoch de FIN DE VIE applicative
+    if (ml) this.row.maxLife = ml
   }
   addIdx (name: string) {
     this.row[name] = this.data[name]
@@ -284,19 +456,19 @@ class Rb {
 }
 
 async function importArt (data: Object) {
-  await importRow (updType.CREATE, org, clazz, new Rb(data, ['id']).addIdx('auteurs').addIdx('sujet').row)
+  await writeRow (updType.CREATE, org, clazz, new Rb(data, ['id']).addIdx('auteurs').addIdx('sujet').row)
 }
 
 async function updateArt (data: Object) {
-  await importRow (updType.UPDATE, org, clazz, new Rb(data, ['id']).addIdx('auteurs').addIdx('sujet').row)
+  await writeRow (updType.UPDATE, org, clazz, new Rb(data, ['id']).addIdx('auteurs').addIdx('sujet').row)
 }
 
 async function zombiArt (data: Object) {
-  await importRow (updType.UPDATE, org, clazz, new Rb(data, ['id'], true).row)
+  await writeRow (updType.UPDATE, org, clazz, new Rb(data, ['id']).row)
 }
 
 async function importHdr (v: number, label: string, status: number) {
-  await importRow (updType.CREATE, '', 'ROOT', { pk: 'hdr', v: v, data: JSON.stringify({ v, label, status})})
+  await writeRow (updType.CREATE, '', 'ROOT', { pk: 'hdr', v: v, data: JSON.stringify({ v, label, status})})
 }
 
 function trap (e: any) : [number, string] { // 1: busy, 2: autre
@@ -342,16 +514,22 @@ async function main3 () : Promise<string> {
       await fs.runTransaction(async (tr) => { 
         op = new Operation(tr)
         await importArt({ id: 'a5' + i, auteurs: ['h', 'v'], sujet: 'S1', v: time + 100 + i, texte: 'blabla' })
-        await importArt({ id: 'a6' + i, auteurs: ['h'], sujet: 'S1', v: time + 100 + i, texte: 'blublu' })
+        await importArt({ id: 'a6' + i, auteurs: ['h', 'q', 'z'], sujet: 'S1', v: time + 100 + i, texte: 'blublu' })
         await importArt({ id: 'a7' + i, auteurs: ['z'], sujet: 'S1', v: time + 100 + i, texte: 'blublu' })
         await op.commit()
       })
 
     op = new Operation()
 
+    await selectDocs(org, clazz, 'auteurs', filter.CONTAINSANY, ['q', 'z'], (row: row) => {
+      const data = JSON.parse(row.data)
+      console.log('selected ', row.pk, data.id, data.auteurs)
+    })
+
     let rows: Object[]
-    let row: rowD | null
-    let a52: rowD | null
+    let row: row | null
+    let a52: row | null
+    let a62: row | null
 
     titre('allRows')
     rows = await allRows(org, clazz, 0)
@@ -368,6 +546,12 @@ async function main3 () : Promise<string> {
     console.log(row ? JSON.stringify(row) : 'NOT FOUND')
     a52 = row
     
+    t = 0
+    titre('Article a62')
+    row = await oneRow(org, clazz, sha12('a62'), 0)
+    console.log(row ? JSON.stringify(row) : 'NOT FOUND')
+    a62 = row
+
     t = 50
     titre('Article a52')
     row = await oneRow(org, clazz, sha12('a52'), time + t)
@@ -380,13 +564,13 @@ async function main3 () : Promise<string> {
 
     {
       titre('collection auteurs h')
-      const [rows, lpkv] = await getColl(org, clazz, 'auteurs', 'h', true, 0, false)
+      const [rows, lpkv] = await getColl(org, clazz, 'auteurs', 'h', true, 0)
       rows.forEach(r => console.log(JSON.stringify(r)))
       console.log(JSON.stringify(lpkv))
     }
 
     clockPlus(1000)
-    if (a52) {
+    if (a52 && a62) {
       await fs.runTransaction(async (tr) => { 
         op = new Operation(tr)
         const data = JSON.parse(a52.data)
@@ -395,32 +579,60 @@ async function main3 () : Promise<string> {
         data['auteurs'] = ['v', 'z']
         await updateArt(data)
         const rowQ : rowQ = { pk: a52.pk, col: 'h', v: time }
-        await importRowQ (org, clazz, 'auteurs', rowQ)
+        await writeRowQ (org, clazz, 'auteurs', rowQ)
+        op.commit()
+      })
+
+      await fs.runTransaction(async (tr) => { 
+        op = new Operation(tr)
+        const data = JSON.parse(a62.data)
+        data['texte'] = 'blxblx'
+        data['v'] = time + 100
+        data['auteurs'] = ['q', 'z']
+        await updateArt(data)
+        const rowQ : rowQ = { pk: a62.pk, col: 'h', v: time }
+        await writeRowQ (org, clazz, 'auteurs', rowQ)
         op.commit()
       })
 
       op = new Operation()
+
+      { // Inspection des rowQ
+        const cq = colRefQ(org, clazz, 'auteurs')
+        // 'RPHVLc4-bjzVMLCW@a'
+        // D'après la doc le orderBy est appliqué par défaut
+        const fp = FieldPath.documentId()
+        const q = cq.where(fp, '>', '0').orderBy(fp)
+        const qs: QuerySnapshot = /* op.transaction ? await op.transaction.get(q) : */ await q.get()
+        if (!qs.empty) for (let doc of qs.docs) {
+          const v = doc.get('v')
+          const col = doc.get('col')
+          const pk = doc.id.substring(0, doc.id.indexOf('@'))
+          console.log('pk col v: ', pk, col, v)
+        }
+      }
+
       titre('Article a52')
       row = await oneRow(org, clazz, sha12('a52'), 0)
       console.log(row ? JSON.stringify(row) : 'NOT FOUND')
 
       {
         titre('collection auteurs h')
-        const [rows, lpkv] = await getColl(org, clazz, 'auteurs', 'h', true, time - 1, false)
+        const [rows, lpkv] = await getColl(org, clazz, 'auteurs', 'h', true, time - 1)
         rows.forEach(r => console.log(JSON.stringify(r)))
         console.log(JSON.stringify(lpkv))
       }
 
       {
         titre('collection auteurs h')
-        const [rows, lpkv] = await getColl(org, clazz, 'auteurs', 'h', true, 0, false)
+        const [rows, lpkv] = await getColl(org, clazz, 'auteurs', 'h', true, 0)
         rows.forEach(r => console.log(JSON.stringify(r)))
         console.log(JSON.stringify(lpkv))
       }
 
       {
         titre('collection auteurs z')
-        const [rows, lpkv] = await getColl(org, clazz, 'auteurs', 'z', true, 0, false)
+        const [rows, lpkv] = await getColl(org, clazz, 'auteurs', 'z', true, 0)
         rows.forEach(r => console.log(JSON.stringify(r)))
         console.log(JSON.stringify(lpkv))
       }
@@ -430,10 +642,10 @@ async function main3 () : Promise<string> {
     if (a52) {
       await fs.runTransaction(async (tr) => { 
         op = new Operation(tr)
-        const data = { id: 'a52', v: time }
+        const data = { id: 'a52', v: time, deleted: true }
         await zombiArt(data)
-        await importRowQ (org, clazz, 'auteurs', { pk: a52.pk, col: 'v', v: time })
-        await importRowQ (org, clazz, 'auteurs', { pk: a52.pk, col: 'z', v: time })
+        await writeRowQ (org, clazz, 'auteurs', { pk: a52.pk, col: 'v', v: time })
+        await writeRowQ (org, clazz, 'auteurs', { pk: a52.pk, col: 'z', v: time })
         op.commit()
       })
 
@@ -444,11 +656,45 @@ async function main3 () : Promise<string> {
 
       {
         titre('collection auteurs z')
-        const [rows, lpkv] = await getColl(org, clazz, 'auteurs', 'z', true, 0, false)
+        const [rows, lpkv] = await getColl(org, clazz, 'auteurs', 'z', true, 0)
         rows.forEach(r => console.log(JSON.stringify(r)))
         console.log(JSON.stringify(lpkv))
       }
     }
+
+    const myRows : row[] = []
+    let mark = '0' // ATTENTION!!! ne pas mettre ''
+    let fin = false
+    while (!fin) {
+      const { rows, eox, lastMark } = await exportRows(org, clazz, mark, 3)
+      rows.forEach(r => { myRows.push(r); console.log('export D: ', r.pk)})
+      fin = eox
+      mark = lastMark
+    }
+
+    const myRowsQ : rowQ[] = []
+    mark = '0' // ATTENTION!!! ne pas mettre ''
+    fin = false
+    while (!fin) {
+      const { rows, eox, lastMark } = await exportRowsQ(org, clazz, 'auteurs', mark, 3)
+      rows.forEach(r => { myRowsQ.push(r); console.log('export Q: ', r.pk, r.col, r.v)})
+      fin = eox
+      mark = lastMark
+    }
+
+    fin = false
+    while (!fin) {
+      fin = await purgeRows(org, clazz, 5)
+    }
+
+    fin = false
+    while (!fin) {
+      fin = await purgeRowsQ(org, clazz, 'auteurs', 5)
+    }
+
+    await importRows(org, clazz, myRows)
+
+    await importRowsQ(org, clazz, 'auteurs', myRowsQ)
 
     return 'OK'
   } catch (e) {

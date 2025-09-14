@@ -34,7 +34,7 @@
     },
     {
       "collectionGroup": "Article@auteurs",
-      "fieldPath": "val",
+      "fieldPath": "col",
       "indexes": [{ "order": "ASCENDING", "queryScope": "COLLECTION" }]
     },
     {
