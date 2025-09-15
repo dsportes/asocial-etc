@@ -23,13 +23,13 @@ En cours d'exécution, on peut faire un export depuis un autre terminal:
 */
 
 /* TODO
-- gérer les vraies suppressions (purge).
 - gérer FTP.
 - gérer la class LOCK et presetLock.
 */
 
 import { env } from 'process'
-import { FieldPath, DocumentReference, Firestore, Query, QuerySnapshot, Timestamp, Transaction, WhereFilterOp } from '@google-cloud/firestore'
+import { FieldPath, DocumentReference, Firestore, Query, QuerySnapshot, 
+  Timestamp, Transaction, WhereFilterOp, OrderByDirection } from '@google-cloud/firestore'
 import crypto from 'crypto'
 // import { encode, decode } from '@msgpack/msgpack'
 
@@ -55,7 +55,7 @@ enum updType { CREATE, UPDATE, SET, DELETE }
 type update = {
   type: updType,
   dr: DocumentReference,
-  row: row | rowQ
+  row?: row | rowQ
 }
 
 class Operation {
@@ -67,15 +67,19 @@ class Operation {
     this.updates = []
   }
 
-  setUpd (type: updType, dr: DocumentReference, row: row | rowQ) {
+  setUpd (type: updType, dr: DocumentReference, row: row | rowQ ) {
     this.updates.push({type, dr, row})
+  }
+
+  setDel (dr: DocumentReference ) {
+    this.updates.push({type: updType.DELETE, dr})
   }
 
   async commit () {
     for (const u of this.updates) {
       switch (u.type) {
-        case updType.CREATE : { 
-          if (this.transaction) this.transaction.create(u.dr, u.row); else await u.dr.create(u.row)
+        case updType.CREATE : {
+          if (this.transaction) this.transaction.create(u.dr, u.row); else if (u.row) await u.dr.create(u.row)
           break
         }
         case updType.UPDATE : { 
@@ -83,7 +87,11 @@ class Operation {
           break
         }
         case updType.SET : { 
-          if (this.transaction) this.transaction.set(u.dr, u.row); else await u.dr.set(u.row)
+          if (this.transaction) this.transaction.set(u.dr, u.row); else if (u.row) await u.dr.set(u.row)
+          break
+        }
+        case updType.DELETE : { 
+          if (this.transaction) this.transaction.delete(u.dr); else await u.dr.delete()
           break
         }
       }
@@ -119,7 +127,8 @@ type row = {
   maxLife?: number, // time de fin de vie programmée par l'application (précision en minutes)
   ttl?: Timestamp, // DB seulement - TTL pour purge automatique par la DB
   deleted?: boolean, // APP seulement - document supprimé
-  data: string
+  data: string,
+  [index: string]:any
 }
 
 /* Transforme un row DB en row APP
@@ -303,6 +312,10 @@ async function writeRow (ut: updType, org: string, clazz: string, row: row) {
   op.setUpd(ut, docRef(org, clazz, row.pk), rowToDB(row))
 }
 
+async function deleteDoc (org: string, clazz: string, pk: string) {
+  op.setDel(docRef(org, clazz, pk))
+}
+
 /* Inscrit le rowQ déclarant que le document clazz/pk ne fait plus
 partie de la collection clazz/col à partir de v.
 - clazz: classe du document - 'Article'
@@ -417,9 +430,11 @@ enum filter { LT, LE, EQ, NE, GE, GT, CONTAINS, CONTAINSANY }
 const opFilter = [ '<', '<=', '==', '!=', '>=', '>', 'array-contains', 'array-contains-any']
 
 async function selectDocs(org: string, clazz: string, colName: string, filter: filter, col: any, 
-  fn: Function) {
+  order: string, limit: number, fn: Function) {
   
-  const q: Query = colRef(org, clazz).where(colName, opFilter[filter] as WhereFilterOp, col)
+  let q: Query = colRef(org, clazz).where(colName, opFilter[filter] as WhereFilterOp, col)
+  if (order) q = q.orderBy(order)
+  if (limit) q = q.limit(limit)
   const qs: QuerySnapshot = op.transaction ? await op.transaction.get(q) : await q.get()
   if (!qs.empty) for (let doc of qs.docs) {
     const row = rowToAPP(doc.data() as row)
@@ -427,8 +442,31 @@ async function selectDocs(org: string, clazz: string, colName: string, filter: f
   }
 }
 
+async function selectDocsGlobal(clazz: string, colName: string, filter: filter, col: any, 
+  order: string, limit: number, fn: Function) {
+
+  let q: Query = fs.collectionGroup(clazz).where(colName, opFilter[filter] as WhereFilterOp, col)
+  if (order) {
+    let dir = 'asc'
+    if (order.startsWith('-')) {
+      order = order.substring(1)
+      dir = 'desc'
+    }
+    q = q.orderBy(order, dir as OrderByDirection)
+  }
+  if (limit) q = q.limit(limit)
+  const qs: QuerySnapshot = op.transaction ? await op.transaction.get(q) : await q.get()
+  if (!qs.empty) for (let doc of qs.docs) {
+    const row = rowToAPP(doc.data() as row)
+    const p = doc.ref.path
+    const i = p.indexOf('/', 5)
+    const org = p.substring(4, i)
+    fn(org, row)
+  }
+}
+
 // Simulation de la couche au-dessus
-function getPk (data: Object, props: string[]) {
+function getPk (data: any, props: string[]) {
   if (props.length === 1) return sha12(data[props[0]])
   const t : string[] = []
   props.forEach(p => { t.push(data[p])})
@@ -437,8 +475,8 @@ function getPk (data: Object, props: string[]) {
 
 class Rb {
   row: row
-  data: Object
-  constructor (data: Object, props: string[]) {
+  data: {[index: string]:any}
+  constructor (data: any, props: string[]) {
     this.data = data
     this.row = { 
       pk: getPk(data, props), 
@@ -456,11 +494,11 @@ class Rb {
 }
 
 async function importArt (data: Object) {
-  await writeRow (updType.CREATE, org, clazz, new Rb(data, ['id']).addIdx('auteurs').addIdx('sujet').row)
+  await writeRow (updType.CREATE, org, clazz, new Rb(data, ['id']).addIdx('auteurs').addIdx('sujet').addIdx('volume').row)
 }
 
 async function updateArt (data: Object) {
-  await writeRow (updType.UPDATE, org, clazz, new Rb(data, ['id']).addIdx('auteurs').addIdx('sujet').row)
+  await writeRow (updType.UPDATE, org, clazz, new Rb(data, ['id']).addIdx('auteurs').addIdx('sujet').addIdx('volume').row)
 }
 
 async function zombiArt (data: Object) {
@@ -497,6 +535,56 @@ function titre (l: string) {
   console.log('\n time:' + (time - time0) + '   v:' + t + ' ---------------- ' + l)
 }
 
+async function main4 () : Promise<string> {
+  try {
+    for(let i = 0; i < 4; i++)
+      await fs.runTransaction(async (tr) => { 
+        op = new Operation(tr)
+        await importArt({ id: 'a5' + i, auteurs: ['h', 'v'], sujet: 'S1', volume: 50, v: time + 100 + i, texte: 'blabla' })
+        await importArt({ id: 'a6' + i, auteurs: ['h', 'q', 'z'], volume: 60, sujet: 'S1', v: time + 100 + i, texte: 'blublu' })
+        await importArt({ id: 'a7' + i, auteurs: ['z'], sujet: 'S1', volume: 70, v: time + 100 + i, texte: 'blublu' })
+        await op.commit()
+      })
+
+    op = new Operation()
+
+    await selectDocs(org, clazz, 'auteurs', filter.CONTAINSANY, ['q', 'z'], '', 0, (row: row) => {
+      const data = JSON.parse(row.data)
+      console.log('selected ', row.pk, data.id, data.auteurs)
+    })
+
+    await selectDocsGlobal(clazz, 'volume', filter.GT, 50, '-volume', 5, (org: row, row: row) => {
+      const data = JSON.parse(row.data)
+      console.log('selectedG ', row.pk, data.id, org, data.volume)
+    })
+
+    titre('Article a52')
+    let row = await oneRow(org, clazz, sha12('a52'), 0)
+    console.log(row ? JSON.stringify(row) : 'NOT FOUND')
+    let a52 = row
+
+    clockPlus(1000)
+    if (a52) {
+      await fs.runTransaction(async (tr) => { 
+        op = new Operation(tr)
+        if (a52) await deleteDoc(org, clazz, a52.pk)
+        op.commit()
+      })
+    }
+
+    op = new Operation()
+    titre('Article a52')
+    row = await oneRow(org, clazz, sha12('a52'), 0)
+    console.log(row ? JSON.stringify(row) : 'NOT FOUND')
+    a52 = row
+
+    return 'OK'
+  } catch (e) {
+    console.log(e)
+    return 'KO'
+  }
+}
+
 async function main3 () : Promise<string> {
   try {
     console.log('PING: ' + (await ping())[1])
@@ -521,7 +609,7 @@ async function main3 () : Promise<string> {
 
     op = new Operation()
 
-    await selectDocs(org, clazz, 'auteurs', filter.CONTAINSANY, ['q', 'z'], (row: row) => {
+    await selectDocs(org, clazz, 'auteurs', filter.CONTAINSANY, ['q', 'z'], '', 0, (row: row) => {
       const data = JSON.parse(row.data)
       console.log('selected ', row.pk, data.id, data.auteurs)
     })
@@ -704,6 +792,6 @@ async function main3 () : Promise<string> {
 }
 
 setTimeout(async () => {
-  const res = await main3()
+  const res = await main4()
   console.log(res)
 }, 10)

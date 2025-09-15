@@ -19,6 +19,11 @@
     },
     {
       "collectionGroup": "Article",
+      "fieldPath": "volume",
+      "indexes": [{ "order": "ASCENDING", "queryScope": "COLLECTION_GROUP" }]
+    },
+    {
+      "collectionGroup": "Article",
       "fieldPath": "data",
       "indexes": []
     },
