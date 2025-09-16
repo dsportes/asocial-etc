@@ -387,7 +387,6 @@ Il se peut que dans Q soient cités des documents ayant quitté la collection
 à t2 alors qu'ils inscrits comme présents à t3 dans D. Ils sont à ignorer (D l'emporte sur Q)
 
 isList: true si la propriété 'auteurs' est une liste.
-appttl: true si la ttl est gérée par l'application
 */
 async function getColl(org: string, clazz: string, 
   colName: string, col: string, isList: boolean, v: number) : Promise<[row[], pkv[]]> {
