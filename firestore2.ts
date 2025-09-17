@@ -518,7 +518,7 @@ function trap (e: any) : [number, string] { // 1: busy, 2: autre
 async function ping () : Promise<[number, string]> {
   try {
     let t = '?'
-    const dr = docRef('', 'ROOT', 'ping')
+    const dr = docRef('ROOT', 'Ping', '1')
     const ds = await dr.get()
     if (ds.exists) t = ds.get('data')
     const v = time
