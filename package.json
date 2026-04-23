@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "main": "index.js",
   "license": "MIT",
+  "scripts": {       
+    "start": "live-server"     
+  },
   "dependencies": {
     "@google-cloud/firestore": "^6.7.0",
     "@google-cloud/logging-winston": "^6.0.0",
@@ -13,6 +16,7 @@
     "better-sqlite3": "^8.0.1",
     "js-sha256": "^0.9.0",
     "showdown": "^1.9.1",
+    "typescript": "^6.0.3",
     "websocket": "^1.0.34",
     "winston": "^3.10.0"
   },
