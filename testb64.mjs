@@ -4,19 +4,29 @@ function ab2str(buf) {
   return String.fromCharCode.apply(null, new Uint8Array(buf));
 }
 
-function str2ab(str) {
+function str2ab1(str) {
   const buf = new ArrayBuffer(str.length)
   const bufView = new Uint8Array(buf)
   for (let i = 0, strLen = str.length; i < strLen; i++) bufView[i] = str.charCodeAt(i)
-  return buf
+  return new Uint8Array(buf)
+}
+
+function str2ab(str) {
+  // const buf = new ArrayBuffer(str.length)
+  const bufView = new Uint8Array(str.length)
+  for (let i = 0, strLen = str.length; i < strLen; i++) bufView[i] = str.charCodeAt(i)
+  return bufView
 }
 
 function keyToB64(key) {
-  return window.btoa(ab2str(key))
+  return window.btoa( String.fromCharCode.apply(null, key))
 }
 
 function keyFromB64 (key) { // BEST-200-2000-20000
-  return str2ab(window.atob(key))
+  const s = window.atob(key)
+  const u8 = new Uint8Array(s.length)
+  for (let i = 0, strLen = key.length; i < strLen; i++) u8[i] = s.charCodeAt(i)
+  return u8
 }
 
 function random (nbytes) {
@@ -25,19 +35,27 @@ function random (nbytes) {
   return u8
 }
 
+function eq (a, b) {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+  return true
+}
+
 function toUrl1 (s) {
   return s.replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
 }
 
 function toUrl2 (s) { // BEST-200-2000-20000
   let i = s.length
-  for(; s.charAt(i) === '='; i--) {}
+  for(; s.charAt(i - 1) === '='; i--) {}
   const x = s.substring(0, i).replace(/\+/g, '-').replace(/\//g, '_')
   return x
 }
 
 function fromUrl (s) { // BEST-200-2000-20000
-  return s.replace(/-/g, '+').replace(/_/g, '/') + '===='.substring(0, 4 - s.length % 4)
+  const diff = s.length % 4
+  const pad = diff ? '===='.substring(0, 4 - diff) : ''
+  return s.replace(/-/g, '+').replace(/_/g, '/') + pad
   // return s.replaceAll('-', '+').replace('_', '/') + '===='.substring(0, 4 - s.length % 4)
 }
 
@@ -66,10 +84,23 @@ function bytesToBase64(bytes) {
   return btoa(binString);
 }
 
-let bin1 = random(200)
-let n = 1000000
+let bin1
+let n = 1
 let s
 let b
+let s2
+
+for(let i = 0; i < 5; i++) {
+  bin1 = random(200 + i)
+  s = keyToB64(bin1)
+  let u = toUrl2(s)
+  let s3 = fromUrl(u)
+  console.log('s s3', s === s3)
+  b = keyFromB64(s)
+  console.log('eq bin1 u', eq(bin1, b))
+  s2 = keyToB64(b)
+  console.log('=== s s2', s === s2)
+}
 
 function t1 () {
   let t0 = Date.now()
