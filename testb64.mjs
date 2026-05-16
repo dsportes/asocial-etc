@@ -84,6 +84,32 @@ function bytesToBase64(bytes) {
   return btoa(binString);
 }
 
+const p2 = [1, 0, 0, 0, 0, 0]; for (let i = 1; i < 6; i++) p2[i] = p2[i - 1] * 256
+
+function b64ToInt (b64) { // b64 sur 8 char -> number integer safe
+  const u8 = b64ToU8(b64)
+  let r = 0
+  for (let j = 0; j < 6; j++) r += (p2[j] * u8[j])
+  return r
+}
+
+function intToB64 (n) { // n: number integer safe -> 8 char
+  const u8 = new Uint8Array(6)
+  let x = n
+  for (let j = 0; j < 6; j++) {   
+    u8[j] = x % 256
+    x = Math.floor(x / 256)
+  }
+  return u8ToB64(u8)
+}
+
+let x = Date.now()
+console.log(x)
+let nn = intToB64(x)
+console.log(nn)
+let y = b64ToInt(nn)
+console.log(y)
+
 let bin1
 let n = 1
 let s
