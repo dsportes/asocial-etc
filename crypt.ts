@@ -380,22 +380,51 @@ export async function testECDH () {
 }
 
 export async function testECDH2 () {
-  const x = new TextEncoder().encode('toto est tres tres beau')
+  /*
+  Le couple `[docKey_B pubc_A]` d'un document dans un credential B est:
+  - `pubc_A` est la clé publique de cryptage du credential A qui a transmis la _docKey_ à B.
+  - `docKey_B` est cryptée par `[privd_B pubc_A]` où `privd_B` est la clé privée du credential B (que B a dans sa Safe Box): B peut à tout instant décoder `docKey_B`.
 
-  const pairA = await Crypt.getKeyPair()
-  const pairB = await Crypt.getKeyPair()
+  Quand B doit transmettre _docKey_ à un credential C:
+  - B décrypte `docKey_B`.
+  - B le crypte en `docKey_C` par `[privd_B, pubc_C]` où `pubc_C` est la clé publique de cryptage du credential C.
+  - B transmet au credential C le couple `[docKey_C pubc_B]`.
 
-  const aes1 = await Crypt.getAESKey(pairA.pub, pairB.priv)
-  console.log(keyToB64(aes1))
-  const c1 = await Crypt.crypt(aes1, x)
-  const aes2 = await Crypt.getAESKey(pairB.pub, pairA.priv)
-  console.log(keyToB64(aes2))
-  const d1 = await Crypt.decrypt(aes2, c1)
-  console.log(decoder.decode(d1))
-  const aes3 = await Crypt.getAESKey(pairA.pub, pairA.priv)
-  console.log(keyToB64(aes3))
-  const d2 = await Crypt.decrypt(aes3, c1)
-  console.log(d2 ? decoder.decode(d2) : 'fail')
+  Mais le _créateur_ A du document a généré cette clé et ne l'a pas _reçu_:
+  - il génère un couple `[privd_X pubc_X]`.
+  - il crypte docKey en docKey_A crypté par `[privd_A pubc_X]` et stocke dans son credential `[docKey_A pubc_X]`.
+  */
+
+  async function step (n) {
+    const aes1 = await Crypt.getAESKey(c[n][1], pairs[n + 1].priv)
+    console.log('aesA' + n + ': ' + keyToB64(aes1))
+    const x = await Crypt.decrypt(aes1, c[n][0])
+    console.log('K pour ' + n + ': ' + decoder.decode(x))
+    if (n < 2) {
+      c[n + 1] = [null, pairs[n + 1].pub]
+      const aes2 = await Crypt.getAESKey(c[n + 1][1], pairs[n + 2].priv)
+      console.log('aesB' + n + ': ' + keyToB64(aes1))
+      c[n + 1][0] = await Crypt.crypt(aes2, x)
+    }
+  }
+
+  const x = encoder.encode('toto est tres tres beau')
+
+  const pairs = [
+    await Crypt.getKeyPair(),
+    await Crypt.getKeyPair(),
+    await Crypt.getKeyPair(),
+    await Crypt.getKeyPair()
+  ]
+
+  const c = new Array(4)
+
+  const aes0 = await Crypt.getAESKey(pairs[0].pub, pairs[1].priv)
+  c[0] = [await Crypt.crypt(aes0, x), pairs[0].pub]
+
+  await step(0)
+  await step(1)
+  await step(2)
 
 }
 
