@@ -416,8 +416,12 @@ export async function testECDH2 () {
     await Crypt.getKeyPair(),
     await Crypt.getKeyPair()
   ]
-
   const c = new Array(4)
+
+  const aesx = await Crypt.getAESKey(pairs[0].pub, pairs[0].priv)
+  const xx = await Crypt.crypt(aesx, x)
+  const xxx = await Crypt.decrypt(aesx, xx)
+  console.log('K: ' + decoder.decode(xxx))
 
   const aes0 = await Crypt.getAESKey(pairs[0].pub, pairs[1].priv)
   c[0] = [await Crypt.crypt(aes0, x), pairs[0].pub]
