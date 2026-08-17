@@ -126,3 +126,14 @@ export function fromByteArray(uint8) {
     }
     return parts.join('');
 }
+
+const encoder = new TextEncoder()
+const decoder = new TextDecoder()
+let bin = encoder.encode('$!$!')
+let b64 = fromByteArray(bin)
+let txt = decoder.decode(toByteArray(b64))
+console.log(bin, b64, txt)
+bin = encoder.encode('$!$!toto')
+b64 = fromByteArray(encoder.encode('$!$!toto'))
+txt = decoder.decode(toByteArray(b64))
+console.log(bin, b64, txt)
